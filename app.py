@@ -1,7 +1,6 @@
 # ==========================================
-# [Final v35.0] 태풍 분석 통합 시스템 (Hybrid Offline Edition)
+# [Final v35.1] 태풍 분석 통합 시스템 (Hybrid - Logic Restored)
 # ==========================================
-# 특징: 고정DB 자동 로드 + 변동 파일 2개 업로드 + 보안 완벽 + 결과 엑셀 다운로드
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,23 +11,21 @@ from folium.features import DivIcon
 from datetime import datetime, timedelta, time
 import airportsdata
 import io
-import os
 
 # ---------------------------------------------------------
 # [STREAMLIT CONFIG]
 # ---------------------------------------------------------
-st.set_page_config(page_title="Typhoon Flight Analyzer (Hybrid)", layout="wide", page_icon="✈️")
+st.set_page_config(page_title="Typhoon Flight Analyzer", layout="wide", page_icon="✈️")
 
-# 사용자 설정
 with st.sidebar:
     st.header("⚙️ 엔진 설정")
-    USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True, help="체크 시 정밀도 상승, 해제 시 속도 상승")
-    MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, help="이 거리 이상 벌어지면 데이터 오류로 간주 (LJG 등 내륙 점프 방지)")
+    USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
+    MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **고정 DB (Waypoint, Airway, DB_ROUTE)**는 시스템 폴더에서 자동으로 불러옵니다.")
+    st.info("💡 **고정 DB** (Waypoint, Airway, DB_ROUTE)는 자동 로드됩니다.")
 
 # ---------------------------------------------------------
-# 1. 고정 데이터 & 유틸리티 캐싱 (속도 최적화)
+# 1. 고정 데이터 & 유틸리티
 # ---------------------------------------------------------
 @st.cache_resource
 def load_airports():
@@ -36,11 +33,9 @@ def load_airports():
 
 airports_iata, airports_icao = load_airports()
 
-# 🗄️ [핵심] 고정 DB 3개 파일 읽어오기 (앱 실행 시 최초 1회만 메모리에 적재)
 @st.cache_data
 def load_static_db():
     try:
-        # 현재 폴더에 있는 엑셀 파일들을 읽어옵니다. (파일명이 정확히 일치해야 함)
         wp_raw = pd.read_excel("Waypoint.xlsx")
         aw_raw = pd.read_excel("airway.xlsx")
         rte_raw = pd.read_excel("DB_ROUTE.xlsx")
@@ -48,9 +43,8 @@ def load_static_db():
         wp_df = wp_raw.dropna(subset=[wp_raw.columns[0]])
         aw_df = aw_raw.dropna(subset=[aw_raw.columns[0]])
         route_df = rte_raw.dropna(how='all')
-        
         return wp_df, aw_df, route_df
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         return None, None, None
 
 def get_codes(code):
@@ -115,27 +109,20 @@ def interpolate_segment(p1, p2, interval_nm=50):
     except: return []
 
 # ---------------------------------------------------------
-# 2. 엔진 로직 (캐시된 데이터프레임 사용)
+# 2. 엔진 클래스 
 # ---------------------------------------------------------
 class HybridEngine:
     def __init__(self, wp_df, aw_df, route_df):
-        self.wp_df = wp_df
-        self.airway_df = aw_df
-        self.db_route_df = route_df
-        self.global_db = {}
-        self.airway_dict = {}
-        self.route_cache = {}
+        self.wp_df = wp_df; self.airway_df = aw_df; self.db_route_df = route_df
+        self.global_db = {}; self.airway_dict = {}; self.route_cache = {}
 
     def build_db(self):
-        # Waypoints
         names = self.wp_df.iloc[:, 0].astype(str).str.strip().str.upper().values
         lats = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 3].values]
         lons = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 4].values]
         for n, lat, lon in zip(names, lats, lons):
-            if is_valid_coord((lat, lon)): 
-                self.global_db.setdefault(n, []).append((lat, lon))
+            if is_valid_coord((lat, lon)): self.global_db.setdefault(n, []).append((lat, lon))
         
-        # Airway Points
         ids = self.airway_df.iloc[:, 0].fillna("").astype(str).str.strip().str.upper().values
         names_aw = self.airway_df.iloc[:, 2].astype(str).str.strip().str.upper().values
         lats_aw = [dms_to_decimal(x) for x in self.airway_df.iloc[:, 4].values]
@@ -199,39 +186,30 @@ class HybridEngine:
 # ---------------------------------------------------------
 # UI 화면 구성
 # ---------------------------------------------------------
-st.title("🌪️ Typhoon Flight Analyzer (Hybrid Edition)")
+st.title("🌪️ Typhoon Flight Analyzer")
 
-# 1. 고정 DB 로드 상태 확인
 wp_df, aw_df, route_df = load_static_db()
-
-if wp_df is None or aw_df is None or route_df is None:
-    st.error("🚨 폴더에 고정 데이터베이스 파일 3개가 없습니다. (`Waypoint.xlsx`, `airway.xlsx`, `DB_ROUTE.xlsx`)")
-    st.info("이 앱을 구동하는 폴더(또는 GitHub)에 위 3개의 엑셀 파일을 정확한 이름으로 업로드해주세요.")
+if wp_df is None:
+    st.error("🚨 폴더에 고정 데이터베이스 파일 3개가 없습니다.")
     st.stop()
 else:
     if 'engine' not in st.session_state:
-        with st.spinner("📦 고정 데이터베이스 초기화 중... (최초 1회)"):
+        with st.spinner("📦 고정 데이터베이스 초기화 중..."):
             st.session_state.engine = HybridEngine(wp_df, aw_df, route_df)
             st.session_state.engine.build_db()
-        st.success("✅ 고정 데이터베이스 로드 완료! (가장 무거운 작업이 끝났습니다)")
-
-st.markdown("### 🔄 오늘의 분석 파일 업로드")
-st.markdown("매일 바뀌는 스케줄과 태풍 정보 엑셀 파일만 업로드해주세요.")
+        st.success("✅ 엔진 로드 완료")
 
 col1, col2 = st.columns(2)
-with col1:
-    f_skd = st.file_uploader("✈️ SKD_BASE (오늘의 스케줄)", type=['xlsx'])
-with col2:
-    f_rest = st.file_uploader("🌪️ Restrictions (오늘의 태풍 정보)", type=['xlsx'])
+with col1: f_skd = st.file_uploader("✈️ SKD_BASE 업로드", type=['xlsx'])
+with col2: f_rest = st.file_uploader("🌪️ Restrictions 업로드", type=['xlsx'])
 
 if f_skd and f_rest:
     if st.button("🚀 비행편 분석 시작", type="primary", use_container_width=True):
-        with st.spinner("운항편 정밀 분석 중..."):
+        with st.spinner("분석 중입니다. 잠시만 기다려주세요..."):
             eng = st.session_state.engine
             skd_df = pd.read_excel(f_skd)
             rest_df = pd.read_excel(f_rest)
             
-            # 태풍 파싱
             typhoons = []
             for _, r in rest_df.iterrows():
                 try:
@@ -247,24 +225,34 @@ if f_skd and f_rest:
             for idx, row in skd_df.iterrows():
                 progress_bar.progress((idx + 1) / len(skd_df))
                 try:
-                    # 스케줄 엑셀 열 인덱스 가정 (1=FLT, 2=DATE, 8=DEP, 9=ARR, 10=STD, 11=STA)
                     f_no = str(row.iloc[1]); dep = str(row.iloc[8]).strip(); arr = str(row.iloc[9]).strip()
                     status_text.text(f"분석 중: {f_no} ({dep}->{arr})")
                     
-                    matched_routes = eng.db_route_df[
-                        (eng.db_route_df.iloc[:,0].astype(str).str.upper().str.contains(dep)) & 
-                        (eng.db_route_df.iloc[:,1].astype(str).str.upper().str.contains(arr))
-                    ]
+                    # [복원 1] ICN vs RKSI 매칭 로직 완벽 복원
+                    dep_keys, arr_keys = get_codes(dep), get_codes(arr)
+                    mask_d = eng.db_route_df.iloc[:, 0].astype(str).str.upper().isin(dep_keys)
+                    mask_a = eng.db_route_df.iloc[:, 1].astype(str).str.upper().isin(arr_keys)
+                    matched_routes = eng.db_route_df[mask_d & mask_a]
                     
                     if matched_routes.empty: continue
                     
                     d_raw = pd.to_datetime(row.iloc[2], errors='coerce')
                     if pd.isna(d_raw): continue
                     
-                    try:
-                        t_std = pd.to_datetime(str(row.iloc[10])).time()
-                        t_sta = pd.to_datetime(str(row.iloc[11])).time()
-                    except: continue
+                    # [복원 2] 시간 변환 로직(콜론 없는 시간 1430 -> 14:30) 완벽 복원
+                    def _t(x): 
+                        if pd.isna(x): return None
+                        if isinstance(x, time): return x
+                        if isinstance(x, datetime): return x.time()
+                        s = str(x).strip()
+                        if len(s)==4 and s.isdigit(): return time(int(s[:2]), int(s[2:]))
+                        if ':' in s: 
+                            try: return pd.to_datetime(s).time()
+                            except: return None
+                        return None
+
+                    t_std = _t(row.iloc[10]); t_sta = _t(row.iloc[11])
+                    if not t_std or not t_sta: continue
 
                     dt_std = datetime.combine(d_raw.date(), t_std)
                     dt_sta = datetime.combine(d_raw.date(), t_sta)
@@ -272,7 +260,6 @@ if f_skd and f_rest:
                     fly_hours = (dt_sta - dt_std).total_seconds() / 3600 - 0.5
                     if fly_hours < 0.5: fly_hours = 0.5
 
-                    # [P/W 필터]
                     route_objs = []
                     for _, r in matched_routes.iterrows():
                         r_name = str(r.iloc[2]).strip().upper()
@@ -282,7 +269,6 @@ if f_skd and f_rest:
                         
                     if not route_objs: continue
                     
-                    # [P01 속도 기준 로직]
                     ref_route = next((r for r in route_objs if 'P01' in r['name'].upper()), None)
                     if not ref_route: ref_route = min(route_objs, key=lambda x: x['data']['total_dist'])
                     avg_speed = ref_route['data']['total_dist'] / fly_hours
@@ -325,7 +311,7 @@ if f_skd and f_rest:
                             'REC_ROUTE_4': safe_list[3]['name'] if len(safe_list)>3 else "",
                             'DIST_4': f"{safe_list[3]['dist']:.0f}" if len(safe_list)>3 else ""
                         })
-                except Exception as ex: 
+                except Exception as e: 
                     continue
 
             status_text.empty()
@@ -334,7 +320,6 @@ if f_skd and f_rest:
                 st.success(f"🔥 총 {len(df_res)}건의 제한 운항편이 발견되었습니다!")
                 st.dataframe(df_res)
                 
-                # 엑셀 다운로드 포맷 생성 (Summary + 날짜별 시트 분리)
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_res.to_excel(writer, index=False, sheet_name='Summary')
