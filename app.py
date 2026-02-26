@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v35.5] 태풍 분석 통합 시스템 (Dual Core + 정밀 에어웨이 + 중국 통과(ZJ 예외 추가))
+# [Final v35.6] 태풍 분석 통합 시스템 (Dual Core + 정밀 에어웨이 + GIS 지도 시각화)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -9,6 +9,8 @@ import re
 from datetime import datetime, timedelta, time
 import airportsdata
 import io
+import folium
+from streamlit_folium import st_folium
 
 # ---------------------------------------------------------
 # [STREAMLIT CONFIG]
@@ -20,7 +22,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **정밀 에어웨이 알고리즘** 및 **중국 영공 통과 추적기(ZK, ZM, ZJ 제외)**가 활성화되었습니다.")
+    st.info("💡 **정밀 에어웨이 모델** 및 **GIS 지도 시각화 엔진**이 활성화되었습니다.")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -309,7 +311,7 @@ class DualCoreEngine:
 # ---------------------------------------------------------
 # UI 메인 블록
 # ---------------------------------------------------------
-st.title("🌪️ Typhoon Flight Analyzer (Precision Route Engine)")
+st.title("🌪️ Typhoon Flight Analyzer (GIS Map Edition)")
 
 wp_df, aw_df, route_df, fix_df = load_static_db()
 if wp_df is None or aw_df is None or route_df is None:
@@ -344,6 +346,12 @@ if f_skd and f_rest:
                 except: continue
             
             res_list = []; progress_bar = st.progress(0); status_text = st.empty()
+            
+            # [지도 데이터 보관용 딕셔너리]
+            if 'map_store' not in st.session_state:
+                st.session_state.map_store = {}
+            st.session_state.map_store.clear()
+            st.session_state.typhoons = typhoons
             
             for idx, row in skd_df.iterrows():
                 progress_bar.progress((idx + 1) / len(skd_df))
@@ -447,6 +455,15 @@ if f_skd and f_rest:
                             'REC_ROUTE_4': safe_list[3]['name'] if len(safe_list)>3 else "",
                             'DIST_4': f"{safe_list[3]['dist']:.0f}" if len(safe_list)>3 else ""
                         })
+                        
+                        # [지도 표출용 데이터 저장]
+                        dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
+                        arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
+                        st.session_state.map_store[f"{f_no} ({dep}->{arr})"] = {
+                            'dep_coord': dep_c, 'arr_coord': arr_c,
+                            'routes': route_objs,
+                            'risk_routes': risk_routes
+                        }
                 except Exception as e: 
                     continue
 
@@ -466,3 +483,66 @@ if f_skd and f_rest:
                 st.download_button(label="💾 최종 분석 결과 엑셀 다운로드", data=output.getvalue(), file_name="Typhoon_Analysis_Result.xlsx", mime="application/vnd.ms-excel")
             else:
                 st.success("✅ 태풍의 영향을 받는 제한 운항편이 없습니다.")
+
+# ---------------------------------------------------------
+# 3. 지도 시각화 (Folium) 섹션
+# ---------------------------------------------------------
+if 'map_store' in st.session_state and st.session_state.map_store:
+    st.markdown("---")
+    st.subheader("🗺️ 항로 및 태풍 정밀 시각화 지도")
+    
+    flt_list = list(st.session_state.map_store.keys())
+    selected_flt = st.selectbox("지도를 확인할 제한 운항편을 선택하세요:", ["선택하세요..."] + flt_list)
+    
+    if selected_flt != "선택하세요...":
+        m_data = st.session_state.map_store[selected_flt]
+        
+        # 지도 중심 좌표 설정 (출발/도착 중간 지점 또는 아시아 기본 설정)
+        if m_data['dep_coord'] and m_data['arr_coord']:
+            center_lat = (m_data['dep_coord'][0] + m_data['arr_coord'][0]) / 2
+            center_lon = (m_data['dep_coord'][1] + m_data['arr_coord'][1]) / 2
+        else:
+            center_lat, center_lon = 30.0, 125.0 # Asia Default
+            
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=4)
+        
+        # 1. 태풍 반경 표출 (빨간색 원)
+        for ty in st.session_state.typhoons:
+            folium.Circle(
+                location=ty['c'],
+                radius=ty['r'] * 1852, # nm 단위를 미터(m)로 변환
+                color='red',
+                weight=2,
+                fill=True,
+                fill_color='red',
+                fill_opacity=0.3,
+                tooltip=f"태풍 {ty['n']} (반경 {ty['r']}nm)"
+            ).add_to(m)
+            
+        # 2. 항로 표출 (위험=빨강, 안전=파랑)
+        for r in m_data['routes']:
+            r_name = r['name']
+            coords = [pt['coord'] for pt in r['data']['info']]
+            
+            # 이 항로가 위험 리스트에 포함되어 있는지 확인
+            is_risk = any(r_name in r_str for r_str in m_data['risk_routes'])
+            
+            color = 'red' if is_risk else 'blue'
+            weight = 4 if is_risk else 2
+            dash_array = None if is_risk else '5, 5' # 안전 항로는 점선 처리 등 시각적 효과 추가 가능
+            
+            folium.PolyLine(
+                locations=coords,
+                color=color,
+                weight=weight,
+                tooltip=f"{r_name} 항로 ({'위험 - 태풍 제한' if is_risk else '안전 - 우회 추천'})"
+            ).add_to(m)
+            
+        # 3. 공항 마커 표출
+        if m_data['dep_coord']:
+            folium.Marker(m_data['dep_coord'], popup="Departure", icon=folium.Icon(color='green', icon='plane')).add_to(m)
+        if m_data['arr_coord']:
+            folium.Marker(m_data['arr_coord'], popup="Arrival", icon=folium.Icon(color='blue', icon='flag')).add_to(m)
+            
+        # Streamlit에 지도 렌더링
+        st_folium(m, width=1200, height=600)
