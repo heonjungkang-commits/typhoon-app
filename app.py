@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v35.4] 태풍 분석 통합 시스템 (Dual Core + 정밀 에어웨이 추적 부활)
+# [Final v35.5] 태풍 분석 통합 시스템 (Dual Core + 정밀 에어웨이 + 중국 통과(ZJ 예외 추가))
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -20,7 +20,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **정밀 에어웨이 알고리즘(v31.0)** 및 **중국 영공 통과 추적기**가 활성화되었습니다.")
+    st.info("💡 **정밀 에어웨이 알고리즘** 및 **중국 영공 통과 추적기(ZK, ZM, ZJ 제외)**가 활성화되었습니다.")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -146,7 +146,8 @@ class DualCoreEngine:
                     if (n, approx) not in seen_coords:
                         self.global_db.setdefault(n, []).append(coord)
                         seen_coords.add((n, approx))
-                    if fir.startswith('Z') and not fir.startswith('ZK') and not fir.startswith('ZM'):
+                    # 중국 FIR 로직 (Z로 시작하되 ZK, ZM, ZJ 제외)
+                    if fir.startswith('Z') and not fir.startswith('ZK') and not fir.startswith('ZM') and not fir.startswith('ZJ'):
                         self.china_nodes.add((n, approx))
 
         # [코어 2] Waypoint.xlsx 데이터
@@ -161,7 +162,8 @@ class DualCoreEngine:
                 if (n, approx) not in seen_coords:
                     self.global_db.setdefault(n, []).append((lat, lon))
                     seen_coords.add((n, approx))
-                if cc.startswith('Z') and not cc.startswith('ZK') and not cc.startswith('ZM'):
+                # 중국 FIR 로직 (Z로 시작하되 ZK, ZM, ZJ 제외)
+                if cc.startswith('Z') and not cc.startswith('ZK') and not cc.startswith('ZM') and not cc.startswith('ZJ'):
                     self.china_nodes.add((n, approx))
         
         # [Airway 로드]
@@ -196,7 +198,6 @@ class DualCoreEngine:
         self.route_cache[cache_key] = data
         return data
 
-    # 🚨 v31.0의 가장 강력한 '정밀 에어웨이 알고리즘' 완벽 부활!
     def _build_route_raw(self, strip, dep, arr):
         tokens = re.split(r'[\s\.,]+', str(strip))
         tokens = [t.strip().upper() for t in tokens if t.strip()]
@@ -209,7 +210,7 @@ class DualCoreEngine:
         if not start_c and len(dep_keys)>1: start_c = get_airport_coords(dep_keys[-1])
         
         if start_c: 
-            is_cn = any(len(k)==4 and k.startswith('Z') and not k.startswith('ZK') and not k.startswith('ZM') for k in dep_keys)
+            is_cn = any(len(k)==4 and k.startswith('Z') and not k.startswith('ZK') and not k.startswith('ZM') and not k.startswith('ZJ') for k in dep_keys)
             coords_info.append({'coord': start_c, 'name': dep, 'is_china': is_cn})
         prev_coord = start_c if start_c else None
         
