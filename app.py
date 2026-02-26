@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v35.3] 태풍 분석 통합 시스템 (Dual Core + China FIR Transit Tracker)
+# [Final v35.4] 태풍 분석 통합 시스템 (Dual Core + 정밀 에어웨이 추적 부활)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -20,7 +20,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **듀얼 코어 DB** 및 **중국 영공(FIR) 진출입 추적기**가 활성화되어 있습니다.")
+    st.info("💡 **정밀 에어웨이 알고리즘(v31.0)** 및 **중국 영공 통과 추적기**가 활성화되었습니다.")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -128,12 +128,12 @@ class DualCoreEngine:
     def __init__(self, wp_df, aw_df, route_df, fix_df):
         self.wp_df = wp_df; self.airway_df = aw_df; self.db_route_df = route_df; self.fix_df = fix_df
         self.global_db = {}; self.airway_dict = {}; self.route_cache = {}
-        self.china_nodes = set() # 중국 FIR에 속하는 웨이포인트 집합
+        self.china_nodes = set()
 
     def build_db(self):
         seen_coords = set()
         
-        # [코어 1] GIS 데이터 (WKT 파싱)
+        # [코어 1] GIS 데이터
         if self.fix_df is not None:
             names_fix = self.fix_df.iloc[:, 0].astype(str).str.strip().str.upper().values
             fir_fix = self.fix_df.iloc[:, 4].astype(str).str.strip().str.upper().values
@@ -146,7 +146,6 @@ class DualCoreEngine:
                     if (n, approx) not in seen_coords:
                         self.global_db.setdefault(n, []).append(coord)
                         seen_coords.add((n, approx))
-                    # 중국 FIR 판별 로직 (Z로 시작, ZK/ZM 제외)
                     if fir.startswith('Z') and not fir.startswith('ZK') and not fir.startswith('ZM'):
                         self.china_nodes.add((n, approx))
 
@@ -162,7 +161,6 @@ class DualCoreEngine:
                 if (n, approx) not in seen_coords:
                     self.global_db.setdefault(n, []).append((lat, lon))
                     seen_coords.add((n, approx))
-                # 중국 FIR 판별 로직
                 if cc.startswith('Z') and not cc.startswith('ZK') and not cc.startswith('ZM'):
                     self.china_nodes.add((n, approx))
         
@@ -198,67 +196,119 @@ class DualCoreEngine:
         self.route_cache[cache_key] = data
         return data
 
+    # 🚨 v31.0의 가장 강력한 '정밀 에어웨이 알고리즘' 완벽 부활!
     def _build_route_raw(self, strip, dep, arr):
         tokens = re.split(r'[\s\.,]+', str(strip))
         tokens = [t.strip().upper() for t in tokens if t.strip()]
         coords_info = []
         dep_keys, arr_keys = get_codes(dep), get_codes(arr)
-        dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
-        arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
         
-        if dep_c: 
+        final_dest = get_airport_coords(arr_keys[0]) if arr_keys else None
+        if not final_dest and len(arr_keys)>1: final_dest = get_airport_coords(arr_keys[-1])
+        start_c = get_airport_coords(dep_keys[0]) if dep_keys else None
+        if not start_c and len(dep_keys)>1: start_c = get_airport_coords(dep_keys[-1])
+        
+        if start_c: 
             is_cn = any(len(k)==4 and k.startswith('Z') and not k.startswith('ZK') and not k.startswith('ZM') for k in dep_keys)
-            coords_info.append({'coord': dep_c, 'name': dep, 'is_china': is_cn})
-        prev = dep_c if dep_c else None
+            coords_info.append({'coord': start_c, 'name': dep, 'is_china': is_cn})
+        prev_coord = start_c if start_c else None
         
         for i, t in enumerate(tokens):
             if t in self.airway_dict:
+                if not prev_coord: continue
                 aw = self.airway_dict[t]
-                if not prev: continue
-                best_s = min(range(len(aw)), key=lambda k: fast_dist_nm(prev, aw[k]['coord']))
-                dest = arr_c
+                s_indices = []
+                for idx, pt in enumerate(aw):
+                    if fast_dist_nm(prev_coord, pt['coord']) < 5.0: s_indices.append(idx)
+                if not s_indices:
+                    min_d = 999999; best_s = 0
+                    for idx, pt in enumerate(aw):
+                        d = fast_dist_nm(prev_coord, pt['coord'])
+                        if d < min_d: min_d = d; best_s = idx
+                    s_indices.append(best_s)
+                
+                e_indices = []
                 if i+1 < len(tokens):
                     nxt = tokens[i+1]
-                    matches = [k for k, p in enumerate(aw) if p['name'] == nxt]
-                    if matches: dest = aw[matches[0]]['coord']
-                if not dest: continue
-                best_e = min(range(len(aw)), key=lambda k: fast_dist_nm(dest, aw[k]['coord']))
+                    name_matches = [idx for idx, pt in enumerate(aw) if pt['name'] == nxt]
+                    if not name_matches:
+                        target_coord = None
+                        if get_airport_coords(nxt): target_coord = get_airport_coords(nxt)
+                        elif nxt in self.global_db:
+                            target_coord = min(self.global_db[nxt], key=lambda p: fast_dist_nm(p, final_dest) if final_dest else 0)
+                        if target_coord:
+                            min_err = 5.0
+                            for idx, pt in enumerate(aw):
+                                d = fast_dist_nm(target_coord, pt['coord'])
+                                if d < min_err: name_matches = [idx]; min_err = d
+                    e_indices = name_matches
+                else:
+                    if final_dest:
+                        min_end_dist = 999999; best_e = 0
+                        for idx, pt in enumerate(aw):
+                            d = fast_dist_nm(final_dest, pt['coord'])
+                            if d < min_end_dist: min_end_dist = d; best_e = idx
+                        e_indices = [best_e]
                 
-                if best_s <= best_e: raw = aw[best_s:best_e+1]
-                else: raw = aw[best_e:best_s+1][::-1]
-                
-                for pt in raw:
-                    curr = pt['coord']
-                    if fast_dist_nm(prev, curr) > MAX_VALID_SEGMENT_NM: continue
-                    
-                    # 내삽된 점은 국적(이름) 정보가 없으므로 False 처리
-                    for ip in interpolate_segment(prev, curr, 50):
-                        coords_info.append({'coord': ip, 'name': None, 'is_china': False})
-                    
-                    name = pt['name']
-                    approx = (round(curr[0], 2), round(curr[1], 2))
-                    is_cn = (name, approx) in self.china_nodes
-                    coords_info.append({'coord': curr, 'name': name, 'is_china': is_cn})
-                    prev = curr
-            else:
-                cand = self.global_db.get(t)
-                if cand:
-                    sel = min(cand, key=lambda p: fast_dist_nm(p, arr_c) if arr_c else 0)
-                    if prev:
-                        if fast_dist_nm(prev, sel) > MAX_VALID_SEGMENT_NM: continue
-                        for ip in interpolate_segment(prev, sel, 50):
-                            coords_info.append({'coord': ip, 'name': None, 'is_china': False})
+                if e_indices:
+                    best_path = None; min_path_len = 9999999
+                    for s in s_indices:
+                        for e in e_indices:
+                            direction = 1 if s <= e else -1
+                            dist = abs(e - s) 
+                            if dist < min_path_len: min_path_len = dist; best_path = (s, e, direction)
+                    if best_path:
+                        s, e, direction = best_path
+                        if direction == 1: raw = aw[s:e+1]
+                        else: raw = aw[e:s+1][::-1]
+                        
+                        if raw and is_valid_coord(prev_coord) and is_valid_coord(raw[0]['coord']):
+                            if fast_dist_nm(prev_coord, raw[0]['coord']) < 2: raw = raw[1:]
+                        
+                        current_valid_pos = prev_coord
+                        for j, pt_data in enumerate(raw):
+                            curr = pt_data['coord']
+                            if not is_valid_coord(curr): continue
+                            jump_dist = fast_dist_nm(current_valid_pos, curr)
+                            if jump_dist > MAX_VALID_SEGMENT_NM: continue 
                             
-                    approx = (round(sel[0], 2), round(sel[1], 2))
-                    is_cn = (t, approx) in self.china_nodes
-                    coords_info.append({'coord': sel, 'name': t, 'is_china': is_cn})
-                    prev = sel
+                            for ip in interpolate_segment(current_valid_pos, curr, 50):
+                                coords_info.append({'coord': ip, 'name': None, 'is_china': False})
+                                
+                            name = pt_data['name']
+                            approx = (round(curr[0], 2), round(curr[1], 2))
+                            is_cn = (name, approx) in self.china_nodes
+                            coords_info.append({'coord': curr, 'name': name, 'is_china': is_cn})
+                            
+                            current_valid_pos = curr
+                        if coords_info: prev_coord = coords_info[-1]['coord']
+            else:
+                sel = None
+                if get_airport_coords(t): sel = get_airport_coords(t)
+                elif t in self.global_db:
+                    sel = min(self.global_db[t], key=lambda p: fast_dist_nm(p, final_dest) if final_dest else 0)
+                if sel and is_valid_coord(sel):
+                    if prev_coord and is_valid_coord(prev_coord):
+                        jump_dist = fast_dist_nm(prev_coord, sel)
+                        if jump_dist <= MAX_VALID_SEGMENT_NM:
+                            for ip in interpolate_segment(prev_coord, sel, 50):
+                                coords_info.append({'coord': ip, 'name': None, 'is_china': False})
+                            approx = (round(sel[0], 2), round(sel[1], 2))
+                            is_cn = (t, approx) in self.china_nodes
+                            coords_info.append({'coord': sel, 'name': t, 'is_china': is_cn})
+                            prev_coord = sel
+                    else:
+                        approx = (round(sel[0], 2), round(sel[1], 2))
+                        is_cn = (t, approx) in self.china_nodes
+                        coords_info.append({'coord': sel, 'name': t, 'is_china': is_cn})
+                        prev_coord = sel
+                        
         return coords_info
 
 # ---------------------------------------------------------
 # UI 메인 블록
 # ---------------------------------------------------------
-st.title("🌪️ Typhoon Flight Analyzer (China Transit Tracker)")
+st.title("🌪️ Typhoon Flight Analyzer (Precision Route Engine)")
 
 wp_df, aw_df, route_df, fix_df = load_static_db()
 if wp_df is None or aw_df is None or route_df is None:
@@ -266,7 +316,7 @@ if wp_df is None or aw_df is None or route_df is None:
     st.stop()
 else:
     if 'engine' not in st.session_state:
-        with st.spinner("📦 듀얼 코어 및 국가 판별 모델 초기화 중..."):
+        with st.spinner("📦 듀얼 코어 및 정밀 라우팅 모델 초기화 중..."):
             st.session_state.engine = DualCoreEngine(wp_df, aw_df, route_df, fix_df)
             st.session_state.engine.build_db()
         st.success(f"✅ 엔진 로드 완료 (총 {len(st.session_state.engine.global_db):,}개의 웨이포인트 장착!)")
@@ -345,7 +395,7 @@ if f_skd and f_rest:
                     
                     risk_routes = []
                     safe_list = []
-                    china_transit_list = [] # 중국 통과 기록 저장용
+                    china_transit_list = []
                     
                     for r in route_objs:
                         r_name = r['name']; r_data = r['data']
@@ -353,17 +403,15 @@ if f_skd and f_rest:
                         est_fly_time = timedelta(hours=est_hours)
                         
                         hit = False; hit_msg = ""
-                        china_pts = [] # 해당 루트의 중국 통과 시점 기록
+                        china_pts = [] 
                         
                         for k, info in enumerate(r_data['info']):
                             progress = r_data['seg_dists'][k] / r_data['total_dist'] if r_data['total_dist'] > 0 else 0
                             p_time = dt_std + timedelta(minutes=15) + (est_fly_time * progress)
                             
-                            # [추가] 중국 FIR 포인트일 경우 기록 (가상의 점 제외)
                             if info['is_china']:
                                 china_pts.append((info['name'], p_time))
                                 
-                            # 태풍 충돌 체크
                             if not hit:
                                 for ty in typhoons:
                                     if fast_dist_nm(info['coord'], ty['c']) <= ty['r']:
@@ -374,11 +422,10 @@ if f_skd and f_rest:
                         if hit: risk_routes.append(hit_msg)
                         else: safe_list.append({'name': r_name, 'dist': r_data['total_dist']})
                         
-                        # [추가] 해당 루트가 중국을 통과했다면 진입/진출 요약 생성
                         if china_pts:
                             entry = china_pts[0]
                             exit_ = china_pts[-1]
-                            if entry[0] == exit_[0]: # 단일 포인트 통과 시
+                            if entry[0] == exit_[0]:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')})")
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
@@ -389,7 +436,7 @@ if f_skd and f_rest:
                             'FLT': f_no, 'DATE': str(d_raw.date()), 'DEP': dep, 'ARR': arr,
                             'STD': t_std.strftime("%H:%M"), 'STA': t_sta.strftime("%H:%M"),
                             'RESTRICTED_ROUTES': ", ".join(risk_routes),
-                            'CHINA_TRANSIT': ", ".join(china_transit_list) if china_transit_list else "N/A", # 새 컬럼 추가
+                            'CHINA_TRANSIT': ", ".join(china_transit_list) if china_transit_list else "N/A",
                             'REC_ROUTE_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
                             'DIST_1': f"{safe_list[0]['dist']:.0f}" if len(safe_list)>0 else "",
                             'REC_ROUTE_2': safe_list[1]['name'] if len(safe_list)>1 else "",
