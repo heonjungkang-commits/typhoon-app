@@ -1,13 +1,11 @@
 # ==========================================
-# [Final v35.1] 태풍 분석 통합 시스템 (Hybrid - Logic Restored)
+# [Final v35.3] 태풍 분석 통합 시스템 (Dual Core + China FIR Transit Tracker)
 # ==========================================
 import streamlit as st
 import pandas as pd
 import numpy as np
 import math
 import re
-import folium
-from folium.features import DivIcon
 from datetime import datetime, timedelta, time
 import airportsdata
 import io
@@ -22,7 +20,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **고정 DB** (Waypoint, Airway, DB_ROUTE)는 자동 로드됩니다.")
+    st.info("💡 **듀얼 코어 DB** 및 **중국 영공(FIR) 진출입 추적기**가 활성화되어 있습니다.")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -40,24 +38,26 @@ def load_static_db():
         aw_raw = pd.read_excel("airway.xlsx")
         rte_raw = pd.read_excel("DB_ROUTE.xlsx")
         
+        try:
+            fix_raw = pd.read_csv("FIX_result.csv")
+        except:
+            fix_raw = None
+        
         wp_df = wp_raw.dropna(subset=[wp_raw.columns[0]])
         aw_df = aw_raw.dropna(subset=[aw_raw.columns[0]])
         route_df = rte_raw.dropna(how='all')
-        return wp_df, aw_df, route_df
+        
+        return wp_df, aw_df, route_df, fix_raw
     except FileNotFoundError:
-        return None, None, None
+        return None, None, None, None
 
-def get_codes(code):
-    c = str(code).strip().upper()
-    res = {c}
-    if len(c)==3 and c in airports_iata: res.add(airports_iata[c]['icao'])
-    elif len(c)==4 and c in airports_icao: res.add(airports_icao[c]['iata'])
-    return list(res)
-
-def get_airport_coords(code):
-    c = str(code).strip().upper()
-    if len(c)==4 and c in airports_icao: return (airports_icao[c]['lat'], airports_icao[c]['lon'])
-    if len(c)==3 and c in airports_iata: return (airports_iata[c]['lat'], airports_iata[c]['lon'])
+def parse_wkt_point(wkt_str):
+    try:
+        match = re.match(r'POINT\s*\(\s*([-\d\.]+)\s+([-\d\.]+)\s*\)', str(wkt_str).upper())
+        if match:
+            lon, lat = float(match.group(1)), float(match.group(2))
+            return (lat, lon)
+    except: pass
     return None
 
 def dms_to_decimal(dms_str):
@@ -108,50 +108,108 @@ def interpolate_segment(p1, p2, interval_nm=50):
         return points
     except: return []
 
+def get_codes(code):
+    c = str(code).strip().upper()
+    res = {c}
+    if len(c)==3 and c in airports_iata: res.add(airports_iata[c]['icao'])
+    elif len(c)==4 and c in airports_icao: res.add(airports_icao[c]['iata'])
+    return list(res)
+
+def get_airport_coords(code):
+    c = str(code).strip().upper()
+    if len(c)==4 and c in airports_icao: return (airports_icao[c]['lat'], airports_icao[c]['lon'])
+    if len(c)==3 and c in airports_iata: return (airports_iata[c]['lat'], airports_iata[c]['lon'])
+    return None
+
 # ---------------------------------------------------------
-# 2. 엔진 클래스 
+# 2. 듀얼 코어 & 중국 FIR 판별 엔진
 # ---------------------------------------------------------
-class HybridEngine:
-    def __init__(self, wp_df, aw_df, route_df):
-        self.wp_df = wp_df; self.airway_df = aw_df; self.db_route_df = route_df
+class DualCoreEngine:
+    def __init__(self, wp_df, aw_df, route_df, fix_df):
+        self.wp_df = wp_df; self.airway_df = aw_df; self.db_route_df = route_df; self.fix_df = fix_df
         self.global_db = {}; self.airway_dict = {}; self.route_cache = {}
+        self.china_nodes = set() # 중국 FIR에 속하는 웨이포인트 집합
 
     def build_db(self):
-        names = self.wp_df.iloc[:, 0].astype(str).str.strip().str.upper().values
-        lats = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 3].values]
-        lons = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 4].values]
-        for n, lat, lon in zip(names, lats, lons):
-            if is_valid_coord((lat, lon)): self.global_db.setdefault(n, []).append((lat, lon))
+        seen_coords = set()
         
+        # [코어 1] GIS 데이터 (WKT 파싱)
+        if self.fix_df is not None:
+            names_fix = self.fix_df.iloc[:, 0].astype(str).str.strip().str.upper().values
+            fir_fix = self.fix_df.iloc[:, 4].astype(str).str.strip().str.upper().values
+            points_fix = self.fix_df.iloc[:, 5].astype(str).values
+            
+            for n, fir, pt_str in zip(names_fix, fir_fix, points_fix):
+                coord = parse_wkt_point(pt_str)
+                if coord and is_valid_coord(coord):
+                    approx = (round(coord[0], 2), round(coord[1], 2))
+                    if (n, approx) not in seen_coords:
+                        self.global_db.setdefault(n, []).append(coord)
+                        seen_coords.add((n, approx))
+                    # 중국 FIR 판별 로직 (Z로 시작, ZK/ZM 제외)
+                    if fir.startswith('Z') and not fir.startswith('ZK') and not fir.startswith('ZM'):
+                        self.china_nodes.add((n, approx))
+
+        # [코어 2] Waypoint.xlsx 데이터
+        names_wp = self.wp_df.iloc[:, 0].astype(str).str.strip().str.upper().values
+        lats_wp = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 3].values]
+        lons_wp = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 4].values]
+        ccs_wp = self.wp_df.iloc[:, 6].astype(str).str.strip().str.upper().values
+        
+        for n, lat, lon, cc in zip(names_wp, lats_wp, lons_wp, ccs_wp):
+            if is_valid_coord((lat, lon)):
+                approx = (round(lat, 2), round(lon, 2))
+                if (n, approx) not in seen_coords:
+                    self.global_db.setdefault(n, []).append((lat, lon))
+                    seen_coords.add((n, approx))
+                # 중국 FIR 판별 로직
+                if cc.startswith('Z') and not cc.startswith('ZK') and not cc.startswith('ZM'):
+                    self.china_nodes.add((n, approx))
+        
+        # [Airway 로드]
         ids = self.airway_df.iloc[:, 0].fillna("").astype(str).str.strip().str.upper().values
         names_aw = self.airway_df.iloc[:, 2].astype(str).str.strip().str.upper().values
         lats_aw = [dms_to_decimal(x) for x in self.airway_df.iloc[:, 4].values]
         lons_aw = [dms_to_decimal(x) for x in self.airway_df.iloc[:, 5].values]
+        
         for aid, name, lat, lon in zip(ids, names_aw, lats_aw, lons_aw):
             if not aid or not is_valid_coord((lat, lon)): continue
-            self.global_db.setdefault(name, []).append((lat, lon))
+            approx = (round(lat, 2), round(lon, 2))
+            if (name, approx) not in seen_coords:
+                self.global_db.setdefault(name, []).append((lat, lon))
+                seen_coords.add((name, approx))
             if aid not in self.airway_dict: self.airway_dict[aid] = []
             self.airway_dict[aid].append({'name': name, 'coord': (lat, lon)})
 
     def get_route_data(self, route_name, strip, dep, arr):
         cache_key = f"{route_name}_{dep}_{arr}"
         if cache_key in self.route_cache: return self.route_cache[cache_key]
-        coords = self._build_route_raw(strip, dep, arr)
-        if not coords: return None
+        
+        coords_info = self._build_route_raw(strip, dep, arr)
+        if not coords_info: return None
+        
+        coords = [pt['coord'] for pt in coords_info]
         total_dist = 0; seg_dists = [0]
         for i in range(len(coords)-1):
             d = fast_dist_nm(coords[i], coords[i+1])
             total_dist += d; seg_dists.append(seg_dists[-1] + d)
-        data = {'coords': coords, 'total_dist': total_dist, 'seg_dists': seg_dists}
+            
+        data = {'coords': coords, 'info': coords_info, 'total_dist': total_dist, 'seg_dists': seg_dists}
         self.route_cache[cache_key] = data
         return data
 
     def _build_route_raw(self, strip, dep, arr):
         tokens = re.split(r'[\s\.,]+', str(strip))
         tokens = [t.strip().upper() for t in tokens if t.strip()]
-        coords = []; dep_c = get_airport_coords(dep); arr_c = get_airport_coords(arr)
-        if dep_c: coords.append(dep_c)
-        prev = coords[-1] if coords else None
+        coords_info = []
+        dep_keys, arr_keys = get_codes(dep), get_codes(arr)
+        dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
+        arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
+        
+        if dep_c: 
+            is_cn = any(len(k)==4 and k.startswith('Z') and not k.startswith('ZK') and not k.startswith('ZM') for k in dep_keys)
+            coords_info.append({'coord': dep_c, 'name': dep, 'is_china': is_cn})
+        prev = dep_c if dep_c else None
         
         for i, t in enumerate(tokens):
             if t in self.airway_dict:
@@ -172,40 +230,54 @@ class HybridEngine:
                 for pt in raw:
                     curr = pt['coord']
                     if fast_dist_nm(prev, curr) > MAX_VALID_SEGMENT_NM: continue
-                    coords.extend(interpolate_segment(prev, curr, 50)); coords.append(curr); prev = curr
+                    
+                    # 내삽된 점은 국적(이름) 정보가 없으므로 False 처리
+                    for ip in interpolate_segment(prev, curr, 50):
+                        coords_info.append({'coord': ip, 'name': None, 'is_china': False})
+                    
+                    name = pt['name']
+                    approx = (round(curr[0], 2), round(curr[1], 2))
+                    is_cn = (name, approx) in self.china_nodes
+                    coords_info.append({'coord': curr, 'name': name, 'is_china': is_cn})
+                    prev = curr
             else:
                 cand = self.global_db.get(t)
                 if cand:
                     sel = min(cand, key=lambda p: fast_dist_nm(p, arr_c) if arr_c else 0)
                     if prev:
                         if fast_dist_nm(prev, sel) > MAX_VALID_SEGMENT_NM: continue
-                        coords.extend(interpolate_segment(prev, sel, 50))
-                    coords.append(sel); prev = sel
-        return coords
+                        for ip in interpolate_segment(prev, sel, 50):
+                            coords_info.append({'coord': ip, 'name': None, 'is_china': False})
+                            
+                    approx = (round(sel[0], 2), round(sel[1], 2))
+                    is_cn = (t, approx) in self.china_nodes
+                    coords_info.append({'coord': sel, 'name': t, 'is_china': is_cn})
+                    prev = sel
+        return coords_info
 
 # ---------------------------------------------------------
-# UI 화면 구성
+# UI 메인 블록
 # ---------------------------------------------------------
-st.title("🌪️ Typhoon Flight Analyzer")
+st.title("🌪️ Typhoon Flight Analyzer (China Transit Tracker)")
 
-wp_df, aw_df, route_df = load_static_db()
-if wp_df is None:
-    st.error("🚨 폴더에 고정 데이터베이스 파일 3개가 없습니다.")
+wp_df, aw_df, route_df, fix_df = load_static_db()
+if wp_df is None or aw_df is None or route_df is None:
+    st.error("🚨 필수 DB 파일이 누락되었습니다. (`Waypoint.xlsx`, `airway.xlsx`, `DB_ROUTE.xlsx`)")
     st.stop()
 else:
     if 'engine' not in st.session_state:
-        with st.spinner("📦 고정 데이터베이스 초기화 중..."):
-            st.session_state.engine = HybridEngine(wp_df, aw_df, route_df)
+        with st.spinner("📦 듀얼 코어 및 국가 판별 모델 초기화 중..."):
+            st.session_state.engine = DualCoreEngine(wp_df, aw_df, route_df, fix_df)
             st.session_state.engine.build_db()
-        st.success("✅ 엔진 로드 완료")
+        st.success(f"✅ 엔진 로드 완료 (총 {len(st.session_state.engine.global_db):,}개의 웨이포인트 장착!)")
 
 col1, col2 = st.columns(2)
 with col1: f_skd = st.file_uploader("✈️ SKD_BASE 업로드", type=['xlsx'])
 with col2: f_rest = st.file_uploader("🌪️ Restrictions 업로드", type=['xlsx'])
 
 if f_skd and f_rest:
-    if st.button("🚀 비행편 분석 시작", type="primary", use_container_width=True):
-        with st.spinner("분석 중입니다. 잠시만 기다려주세요..."):
+    if st.button("🚀 정밀 비행편 분석 시작", type="primary", use_container_width=True):
+        with st.spinner("태풍 회피 및 영공 통과 시간을 정밀 분석 중입니다..."):
             eng = st.session_state.engine
             skd_df = pd.read_excel(f_skd)
             rest_df = pd.read_excel(f_rest)
@@ -228,18 +300,15 @@ if f_skd and f_rest:
                     f_no = str(row.iloc[1]); dep = str(row.iloc[8]).strip(); arr = str(row.iloc[9]).strip()
                     status_text.text(f"분석 중: {f_no} ({dep}->{arr})")
                     
-                    # [복원 1] ICN vs RKSI 매칭 로직 완벽 복원
                     dep_keys, arr_keys = get_codes(dep), get_codes(arr)
                     mask_d = eng.db_route_df.iloc[:, 0].astype(str).str.upper().isin(dep_keys)
                     mask_a = eng.db_route_df.iloc[:, 1].astype(str).str.upper().isin(arr_keys)
                     matched_routes = eng.db_route_df[mask_d & mask_a]
                     
                     if matched_routes.empty: continue
-                    
                     d_raw = pd.to_datetime(row.iloc[2], errors='coerce')
                     if pd.isna(d_raw): continue
                     
-                    # [복원 2] 시간 변환 로직(콜론 없는 시간 1430 -> 14:30) 완벽 복원
                     def _t(x): 
                         if pd.isna(x): return None
                         if isinstance(x, time): return x
@@ -276,6 +345,7 @@ if f_skd and f_rest:
                     
                     risk_routes = []
                     safe_list = []
+                    china_transit_list = [] # 중국 통과 기록 저장용
                     
                     for r in route_objs:
                         r_name = r['name']; r_data = r['data']
@@ -283,18 +353,35 @@ if f_skd and f_rest:
                         est_fly_time = timedelta(hours=est_hours)
                         
                         hit = False; hit_msg = ""
-                        for ty in typhoons:
-                            for k, pt in enumerate(r_data['coords']):
-                                if fast_dist_nm(pt, ty['c']) <= ty['r']:
-                                    progress = r_data['seg_dists'][k] / r_data['total_dist']
-                                    p_time = dt_std + timedelta(minutes=15) + (est_fly_time * progress)
-                                    if ty['s'] <= p_time <= ty['e']:
-                                        hit = True; hit_msg = f"{r_name}({ty['n']})"
-                                        break
-                            if hit: break
+                        china_pts = [] # 해당 루트의 중국 통과 시점 기록
+                        
+                        for k, info in enumerate(r_data['info']):
+                            progress = r_data['seg_dists'][k] / r_data['total_dist'] if r_data['total_dist'] > 0 else 0
+                            p_time = dt_std + timedelta(minutes=15) + (est_fly_time * progress)
+                            
+                            # [추가] 중국 FIR 포인트일 경우 기록 (가상의 점 제외)
+                            if info['is_china']:
+                                china_pts.append((info['name'], p_time))
+                                
+                            # 태풍 충돌 체크
+                            if not hit:
+                                for ty in typhoons:
+                                    if fast_dist_nm(info['coord'], ty['c']) <= ty['r']:
+                                        if ty['s'] <= p_time <= ty['e']:
+                                            hit = True; hit_msg = f"{r_name}({ty['n']})"
+                                            break
                         
                         if hit: risk_routes.append(hit_msg)
                         else: safe_list.append({'name': r_name, 'dist': r_data['total_dist']})
+                        
+                        # [추가] 해당 루트가 중국을 통과했다면 진입/진출 요약 생성
+                        if china_pts:
+                            entry = china_pts[0]
+                            exit_ = china_pts[-1]
+                            if entry[0] == exit_[0]: # 단일 포인트 통과 시
+                                china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')})")
+                            else:
+                                china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
                     if risk_routes:
                         safe_list.sort(key=lambda x: x['dist'])
@@ -302,6 +389,7 @@ if f_skd and f_rest:
                             'FLT': f_no, 'DATE': str(d_raw.date()), 'DEP': dep, 'ARR': arr,
                             'STD': t_std.strftime("%H:%M"), 'STA': t_sta.strftime("%H:%M"),
                             'RESTRICTED_ROUTES': ", ".join(risk_routes),
+                            'CHINA_TRANSIT': ", ".join(china_transit_list) if china_transit_list else "N/A", # 새 컬럼 추가
                             'REC_ROUTE_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
                             'DIST_1': f"{safe_list[0]['dist']:.0f}" if len(safe_list)>0 else "",
                             'REC_ROUTE_2': safe_list[1]['name'] if len(safe_list)>1 else "",
