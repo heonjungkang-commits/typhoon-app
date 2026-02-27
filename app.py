@@ -588,7 +588,7 @@ if f_skd:
                 
                 df_res.columns = [
                     'BND', 'DATE', 'FLT', 'FR', 'TO', 'STD', 'STA', 'AC', 'C_RTE', 
-                    '항로목록', '항로명', 'F/T 증가', '항로명 ', 'F/T 증가 ', '항로명  ', 'F/T 증가  ', '항로명   ', 'F/T 증가   ', 
+                    '제한목록', '항로명', 'F/T 증가', '항로명 ', 'F/T 증가 ', '항로명  ', 'F/T 증가  ', '항로명   ', 'F/T 증가   ', 
                     '최종 사용항로', '승무 구성', '허가신청자', '허가 필요 국가', '중국통과우회항로', '허가 신청', '허가 취득', 'Hidden_CHN_Info'
                 ]
                 
@@ -743,3 +743,4 @@ if f_skd:
             col_m2.metric("리포트 표출 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
             col_m3.metric("안전성 상태", "정상 운항 🟢")
             st.success("✅ 조건에 해당하는 표출 운항편이 없습니다.")
+
