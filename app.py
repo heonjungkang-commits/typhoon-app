@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v38.1] 태풍 분석 시스템 (CHN/SEA 전체 표출 + 수동 입력 허용)
+# [Final v38.2] 태풍 분석 시스템 (스마트 필터링 및 시트 자동 분할)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- **CHN/SEA 바운드 전체 표출 [ON]**\n- 그 외 P-Route 제한편 표출 [ON]\n- 엑셀 동적 수식 연동 [ON]\n- 최종항로 수동입력 허용 [ON]")
+    st.info("💡 **엔진 상태:**\n- CHN/SEA 정상편 우회추천 블라인드 [ON]\n- 실제 제한편만 GIS 표출 [ON]\n- 엑셀 시트 분리 (바운드+날짜) [ON]")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -478,7 +478,7 @@ if f_skd:
                     
                     risk_routes = []
                     safe_list = []
-                    china_transit_list = [] # 중국 통과 정보 저장 (숨김 컬럼용)
+                    china_transit_list = [] 
                     
                     for r in route_objs:
                         r_name = r['name']; r_data = r['data']
@@ -509,7 +509,6 @@ if f_skd:
                         if hit: risk_routes.append(hit_msg)
                         else: safe_list.append({'name': r_name, 'ft_inc': ft_increase})
                         
-                        # 제한된 항로든 안전한 항로든 중국 통과 정보는 모두 수집해둠 (나중에 수동 검색 시 매칭을 위해)
                         if china_pts:
                             entry = china_pts[0]
                             exit_ = china_pts[-1]
@@ -518,20 +517,22 @@ if f_skd:
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
-                    # 🚨 [신규 필터 적용]: BND가 CHN, SEA 이면 무조건 표출, 아니면 P항로 제한 시에만 표출
                     has_p_risk = False
                     if risk_routes:
                         has_p_risk = any(r_str.startswith('P') for r_str in risk_routes)
-                        
+                    
                     pair_key_1 = f"{dep[:3]}/{arr[:3]}"
                     pair_key_2 = f"{dep}/{arr}"
                     bound_val = city_pair_dict.get(pair_key_1, city_pair_dict.get(pair_key_2, ""))
                     
                     s_xx_val = get_s_xx(dep, arr, sxx_dict)
                     
-                    # (CHN, SEA 바운드) 이거나 (그 외 바운드인데 P항로 위험이 있는 경우)
                     if bound_val in ['CHN', 'SEA'] or has_p_risk:
-                        safe_list.sort(key=lambda x: x['ft_inc']) 
+                        # 🚨 [변경됨]: 위험이 없다면 혼란을 방지하기 위해 추천 항로 리스트를 비웁니다.
+                        if not has_p_risk:
+                            safe_list = []
+                        else:
+                            safe_list.sort(key=lambda x: x['ft_inc']) 
                         
                         res_list.append({
                             'BND': bound_val,
@@ -543,9 +544,8 @@ if f_skd:
                             'STA': t_sta.strftime("%H:%M"),
                             'AC': ac_type, 
                             'C_RTE': s_xx_val,
-                            # 예보시간 삭제됨
                             '항로목록': ", ".join(risk_routes) if risk_routes else "",
-                            '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
+                            '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "",
                             'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
                             '항로명_2': safe_list[1]['name'] if len(safe_list)>1 else "",
                             'F/T 증가_2': safe_list[1]['ft_inc'] if len(safe_list)>1 else "",
@@ -557,19 +557,21 @@ if f_skd:
                             '승무 구성': "",
                             '허가신청자': "",
                             '허가 필요 국가': "",
-                            '중국통과우회항로': "", # Formula가 덮어쓸 자리
+                            '중국통과우회항로': "",
                             '허가 신청': "",
                             '허가 취득': "",
-                            'Hidden_CHN_Info': "|".join(china_transit_list) if china_transit_list else "N/A"
+                            'Hidden_CHN_Info': "|".join(china_transit_list) if china_transit_list else ""
                         })
                         
-                        dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
-                        arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
-                        map_store[f"{f_no} ({dep}->{arr})"] = {
-                            'dep_coord': dep_c, 'arr_coord': arr_c,
-                            'routes': route_objs,
-                            'risk_routes': risk_routes
-                        }
+                        # 🚨 [변경됨]: 실제 제한편만 GIS 맵핑 데이터에 저장하여 지도를 깔끔하게 만듭니다.
+                        if has_p_risk:
+                            dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
+                            arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
+                            map_store[f"{f_no} ({dep}->{arr})"] = {
+                                'dep_coord': dep_c, 'arr_coord': arr_c,
+                                'routes': route_objs,
+                                'risk_routes': risk_routes
+                            }
                 except Exception as e: 
                     continue
 
@@ -580,7 +582,6 @@ if f_skd:
             if res_list:
                 df_res = pd.DataFrame(res_list)
                 
-                # '예보시간'이 삭제되고 CHN Route Code -> 중국통과우회항로 로 변경된 최종 25개 컬럼 + 1히든 컬럼
                 df_res.columns = [
                     'BND', 'DATE', 'FLT', 'FR', 'TO', 'STD', 'STA', 'AC', 'C_RTE', 
                     '항로목록', '항로명', 'F/T 증가', '항로명 ', 'F/T 증가 ', '항로명  ', 'F/T 증가  ', '항로명   ', 'F/T 증가   ', 
@@ -591,32 +592,38 @@ if f_skd:
                 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    # 전체 요약 시트
                     df_res.to_excel(writer, index=False, sheet_name='Summary')
                     
                     def format_dynamic_excel(ws, df):
-                        col_w_idx = df.columns.get_loc('중국통과우회항로') # 수식이 들어갈 22번 인덱스
-                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info') # 숨길 25번 인덱스
+                        col_w_idx = df.columns.get_loc('중국통과우회항로')
+                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info')
                         
-                        ws.set_column(col_w_idx, col_w_idx, 35) # 넓이 확장
-                        ws.set_column(col_z_idx, col_z_idx, None, None, {'hidden': 1}) # 데이터 숨김 처리
+                        ws.set_column(col_w_idx, col_w_idx, 35) 
+                        ws.set_column(col_z_idx, col_z_idx, None, None, {'hidden': 1})
                         
                         for row_idx in range(len(df)):
                             excel_row = row_idx + 2
-                            
-                            # 🚨 [변경]: '최종 사용항로(S열)'의 드롭다운(Data Validation) 로직을 완전히 삭제하여 강제 수동 타이핑 허용!
-                            
-                            # '중국통과우회항로(W열)'에 엑셀 MID/SEARCH 함수 삽입
-                            # 사용자가 최종 사용항로(S열)를 수동 입력하면 -> 숨겨진 Z열에서 해당 정보를 찾아내 표출시킴
                             formula = f'=IF(ISBLANK(S{excel_row}),"",IFERROR(MID(Z{excel_row},SEARCH(S{excel_row},Z{excel_row}),IFERROR(SEARCH("|",Z{excel_row},SEARCH(S{excel_row},Z{excel_row}))-SEARCH(S{excel_row},Z{excel_row}),LEN(Z{excel_row})-SEARCH(S{excel_row},Z{excel_row})+1)),"해당 항로 중국통과 정보 없음"))'
                             ws.write_formula(row_idx + 1, col_w_idx, formula)
 
                     format_dynamic_excel(writer.sheets['Summary'], df_res)
                     
+                    # 🚨 [변경됨]: 바운드(CHN, SEA, ETC)와 날짜를 조합하여 다중 시트 생성
                     for d in df_res['DATE'].unique():
-                        sub_df = df_res[df_res['DATE'] == d]
-                        sheet_name = f"RES_{d}"
-                        sub_df.to_excel(writer, index=False, sheet_name=sheet_name)
-                        format_dynamic_excel(writer.sheets[sheet_name], sub_df)
+                        df_date = df_res[df_res['DATE'] == d]
+                        
+                        for bnd_type in ['CHN', 'SEA', 'ETC']:
+                            if bnd_type == 'ETC':
+                                sub_df = df_date[~df_date['BND'].isin(['CHN', 'SEA'])]
+                            else:
+                                sub_df = df_date[df_date['BND'] == bnd_type]
+                                
+                            if not sub_df.empty:
+                                # 엑셀 시트명 31자 제한을 맞추기 위해 글자수 조정
+                                sheet_name = f"{bnd_type}_{d}"[-31:]
+                                sub_df.to_excel(writer, index=False, sheet_name=sheet_name)
+                                format_dynamic_excel(writer.sheets[sheet_name], sub_df)
                 
                 st.session_state.excel_data = output.getvalue()
             else:
@@ -638,24 +645,22 @@ if f_skd:
         
         if st.session_state.df_res is not None:
             total_listed = len(st.session_state.df_res)
-            # 🚨 [UI 업데이트] 전체 표출 개수 중 실제로 P항로가 제한된(항로목록에 P가 포함된) 개수를 카운트
-            p_risk_count = st.session_state.df_res['항로목록'].str.contains(r'P\d', na=False, regex=True).sum()
+            p_risk_count = st.session_state.df_res['항로목록'].astype(str).str.contains(r'P\d', na=False, regex=True).sum()
             
             col_m2.metric("리포트 표출 운항편", f"{total_listed:,}편", delta=f"실제 제한편 {p_risk_count}편 포함", delta_color="inverse")
             col_m3.metric("안전성 상태", "주의 요망 ⚠️" if p_risk_count > 0 else "정상 운항 (모니터링) 🟢")
             
             st.markdown("<br>", unsafe_allow_html=True)
             
-            tab1, tab2 = st.tabs(["📊 상세 분석 테이블", "🗺️ GIS 항로 시각화"])
+            tab1, tab2 = st.tabs(["📊 상세 분석 테이블", "🗺️ GIS 항로 시각화 (제한편 전용)"])
             
             with tab1:
                 st.download_button(
-                    label="💾 엑셀 리포트 다운로드 (동적 수식 적용)", 
+                    label="💾 엑셀 리포트 다운로드 (동적 수식 및 시트분할 적용)", 
                     data=st.session_state.excel_data, 
                     file_name="Typhoon_Analysis_Result_Formatted.xlsx", 
                     mime="application/vnd.ms-excel"
                 )
-                # 웹 화면 표에서는 지저분한 히든 컬럼을 제거하고 깔끔하게 보여줍니다.
                 st.dataframe(st.session_state.df_res.drop(columns=['Hidden_CHN_Info']), use_container_width=True, height=500)
                 
             with tab2:
@@ -703,6 +708,8 @@ if f_skd:
                             folium.Marker(m_data['arr_coord'], popup="Arrival", icon=folium.Icon(color='blue', icon='flag')).add_to(m)
                             
                         st_folium(m, width=1400, height=650)
+                else:
+                    st.info("현재 태풍에 제한받는 운항편이 없어 지도에 표출할 데이터가 없습니다.")
         else:
             col_m2.metric("리포트 표출 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
             col_m3.metric("안전성 상태", "정상 운항 🟢")
