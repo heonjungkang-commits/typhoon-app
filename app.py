@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v38.4] 태풍 분석 시스템 (폼 입력 안정화 및 GIS 웨이포인트 표출)
+# [Final v38.6] 태풍 분석 시스템 (GIS 항로명 플로팅 적용)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- P항로 무사 시 제한목록 블라인드 [ON]\n- 엑셀 시트 분리 [ON]\n- **태풍 Form 입력 안정화 [ON]**\n- **GIS 웨이포인트 마커 표출 [ON]**")
+    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- P항로 무사 시 제한목록 블라인드 [ON]\n- 엑셀 시트 분리 [ON]\n- 태풍 Form 입력 안정화 [ON]\n- **GIS 항로명 다이렉트 플로팅 [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -368,7 +368,6 @@ with col_right:
             '반경(nm)': [300.0, None, None]
         })
 
-    # 🚨 [신규] form을 사용하여 실시간 리런(Rerun) 방지
     with st.form("typhoon_input_form"):
         edited_typhoons = st.data_editor(
             st.session_state.typhoon_input_data, 
@@ -410,7 +409,6 @@ if f_skd:
             st.session_state.total_skd_len = len(skd_df)
             
             typhoons = []
-            # session_state에 저장된 데이터를 불러와서 태풍 분석에 사용
             for _, r in st.session_state.typhoon_input_data.iterrows():
                 try:
                     if pd.isna(r['위도(Lat)']) or pd.isna(r['경도(Lon)']) or not str(r['태풍명']).strip(): continue
@@ -681,7 +679,6 @@ if f_skd:
                             
                         m = folium.Map(location=[center_lat, center_lon], zoom_start=4)
                         
-                        # 태풍 원형 그리기
                         for ty in st.session_state.typhoons:
                             folium.Circle(
                                 location=ty['c'],
@@ -690,7 +687,6 @@ if f_skd:
                                 tooltip=f"태풍 {ty['n']} (반경 {ty['r']}nm)"
                             ).add_to(m)
                             
-                        # 항로 라인 및 🚨 [신규] 웨이포인트(WPT) 마커 그리기
                         for r in m_data['routes']:
                             r_name = r['name']
                             coords = [pt['coord'] for pt in r['data']['info']]
@@ -704,21 +700,33 @@ if f_skd:
                                 locations=coords,
                                 color=color,
                                 weight=weight,
-                                tooltip=f"{r_name} 항로 ({'위험 - 태풍 제한' if is_risk else '안전 - 우회 추천'})"
+                                tooltip=f"{r_name} 항로"
                             ).add_to(m)
                             
-                            # 웨이포인트(WPT) 마커 찍기 (이름이 없는 가상 내삽점 제외)
-                            for pt in r['data']['info']:
-                                if pt['name'] and pt['name'] not in [selected_flt.split('(')[1][:4], selected_flt.split('->')[1][:-1]]:
-                                    folium.CircleMarker(
-                                        location=pt['coord'],
-                                        radius=3, # 마커 크기
-                                        color=color,
-                                        fill=True,
-                                        fill_color='white',
-                                        fill_opacity=0.8,
-                                        tooltip=f"WPT: {pt['name']}" # 마우스 올리면 웨이포인트 이름 노출
-                                    ).add_to(m)
+                            # 🚨 [신규] 항로 중간 지점에 다이렉트로 항로명(P01, W12A 등) 플로팅 뱃지 삽입
+                            if len(coords) > 0:
+                                mid_idx = len(coords) // 2
+                                mid_coord = coords[mid_idx]
+                                
+                                html_label = f"""
+                                <div style="
+                                    font-size: 10pt; 
+                                    color: {color}; 
+                                    font-weight: bold; 
+                                    background-color: rgba(255, 255, 255, 0.85); 
+                                    border: 2px solid {color}; 
+                                    padding: 2px 6px; 
+                                    border-radius: 5px; 
+                                    white-space: nowrap;
+                                    transform: translate(-50%, -50%);
+                                ">
+                                    {r_name}
+                                </div>
+                                """
+                                folium.Marker(
+                                    location=mid_coord,
+                                    icon=folium.DivIcon(html=html_label)
+                                ).add_to(m)
                             
                         if m_data['dep_coord']:
                             folium.Marker(m_data['dep_coord'], popup="Departure", icon=folium.Icon(color='green', icon='plane')).add_to(m)
