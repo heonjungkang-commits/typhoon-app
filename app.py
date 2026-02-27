@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v38.0] 태풍 분석 시스템 (엑셀 동적 수식 및 드롭다운 연동)
+# [Final v38.1] 태풍 분석 시스템 (CHN/SEA 전체 표출 + 수동 입력 허용)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- P-Route 제한 기준 필터 [ON]\n- 탐색 대상: P, W, T 항로 [ON]\n- **엑셀 동적 수식(Formula) 연동 [ON]**")
+    st.info("💡 **엔진 상태:**\n- **CHN/SEA 바운드 전체 표출 [ON]**\n- 그 외 P-Route 제한편 표출 [ON]\n- 엑셀 동적 수식 연동 [ON]\n- 최종항로 수동입력 허용 [ON]")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -478,7 +478,7 @@ if f_skd:
                     
                     risk_routes = []
                     safe_list = []
-                    china_transit_list = []
+                    china_transit_list = [] # 중국 통과 정보 저장 (숨김 컬럼용)
                     
                     for r in route_objs:
                         r_name = r['name']; r_data = r['data']
@@ -509,6 +509,7 @@ if f_skd:
                         if hit: risk_routes.append(hit_msg)
                         else: safe_list.append({'name': r_name, 'ft_inc': ft_increase})
                         
+                        # 제한된 항로든 안전한 항로든 중국 통과 정보는 모두 수집해둠 (나중에 수동 검색 시 매칭을 위해)
                         if china_pts:
                             entry = china_pts[0]
                             exit_ = china_pts[-1]
@@ -517,21 +518,21 @@ if f_skd:
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
+                    # 🚨 [신규 필터 적용]: BND가 CHN, SEA 이면 무조건 표출, 아니면 P항로 제한 시에만 표출
                     has_p_risk = False
                     if risk_routes:
                         has_p_risk = any(r_str.startswith('P') for r_str in risk_routes)
+                        
+                    pair_key_1 = f"{dep[:3]}/{arr[:3]}"
+                    pair_key_2 = f"{dep}/{arr}"
+                    bound_val = city_pair_dict.get(pair_key_1, city_pair_dict.get(pair_key_2, ""))
                     
-                    if has_p_risk:
+                    s_xx_val = get_s_xx(dep, arr, sxx_dict)
+                    
+                    # (CHN, SEA 바운드) 이거나 (그 외 바운드인데 P항로 위험이 있는 경우)
+                    if bound_val in ['CHN', 'SEA'] or has_p_risk:
                         safe_list.sort(key=lambda x: x['ft_inc']) 
                         
-                        pair_key_1 = f"{dep[:3]}/{arr[:3]}"
-                        pair_key_2 = f"{dep}/{arr}"
-                        bound_val = city_pair_dict.get(pair_key_1, city_pair_dict.get(pair_key_2, ""))
-                        
-                        s_xx_val = get_s_xx(dep, arr, sxx_dict)
-                        
-                        # 파이썬 데이터 조립 시 '중국통과우회항로'는 비워두고(수식이 들어갈 자리), 
-                        # 'Hidden_CHN_Info'에 파이프(|)로 구분된 원본 문자열을 숨겨서 전달합니다.
                         res_list.append({
                             'BND': bound_val,
                             'DATE': str(d_raw.date()),
@@ -542,7 +543,8 @@ if f_skd:
                             'STA': t_sta.strftime("%H:%M"),
                             'AC': ac_type, 
                             'C_RTE': s_xx_val,
-                            '항로목록': ", ".join(risk_routes),
+                            # 예보시간 삭제됨
+                            '항로목록': ", ".join(risk_routes) if risk_routes else "",
                             '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
                             'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
                             '항로명_2': safe_list[1]['name'] if len(safe_list)>1 else "",
@@ -578,7 +580,7 @@ if f_skd:
             if res_list:
                 df_res = pd.DataFrame(res_list)
                 
-                # '예보시간'이 빠진 최종 컬럼 리스트 (총 26개)
+                # '예보시간'이 삭제되고 CHN Route Code -> 중국통과우회항로 로 변경된 최종 25개 컬럼 + 1히든 컬럼
                 df_res.columns = [
                     'BND', 'DATE', 'FLT', 'FR', 'TO', 'STD', 'STA', 'AC', 'C_RTE', 
                     '항로목록', '항로명', 'F/T 증가', '항로명 ', 'F/T 증가 ', '항로명  ', 'F/T 증가  ', '항로명   ', 'F/T 증가   ', 
@@ -592,9 +594,8 @@ if f_skd:
                     df_res.to_excel(writer, index=False, sheet_name='Summary')
                     
                     def format_dynamic_excel(ws, df):
-                        col_s_idx = df.columns.get_loc('최종 사용항로') # 18번 인덱스
-                        col_w_idx = df.columns.get_loc('중국통과우회항로') # 22번 인덱스
-                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info') # 25번 인덱스
+                        col_w_idx = df.columns.get_loc('중국통과우회항로') # 수식이 들어갈 22번 인덱스
+                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info') # 숨길 25번 인덱스
                         
                         ws.set_column(col_w_idx, col_w_idx, 35) # 넓이 확장
                         ws.set_column(col_z_idx, col_z_idx, None, None, {'hidden': 1}) # 데이터 숨김 처리
@@ -602,21 +603,10 @@ if f_skd:
                         for row_idx in range(len(df)):
                             excel_row = row_idx + 2
                             
-                            # 1. '최종 사용항로' 칸에 추천 항로 4개를 드롭다운 목록으로 삽입!
-                            valid_opts = []
-                            for i in [10, 12, 14, 16]: # 각 항로명 컬럼 인덱스
-                                val = str(df.iloc[row_idx, i]).strip()
-                                if val and val != "N/A":
-                                    valid_opts.append(val)
+                            # 🚨 [변경]: '최종 사용항로(S열)'의 드롭다운(Data Validation) 로직을 완전히 삭제하여 강제 수동 타이핑 허용!
                             
-                            if valid_opts:
-                                ws.data_validation(row_idx + 1, col_s_idx, row_idx + 1, col_s_idx, {
-                                    'validate': 'list',
-                                    'source': valid_opts
-                                })
-                            
-                            # 2. '중국통과우회항로' 칸에 엑셀 MID/SEARCH 함수 삽입
-                            # 사용자가 최종 사용항로(S열)를 선택하면 -> 숨겨진 Z열에서 해당 정보를 찾아내 표출시킴
+                            # '중국통과우회항로(W열)'에 엑셀 MID/SEARCH 함수 삽입
+                            # 사용자가 최종 사용항로(S열)를 수동 입력하면 -> 숨겨진 Z열에서 해당 정보를 찾아내 표출시킴
                             formula = f'=IF(ISBLANK(S{excel_row}),"",IFERROR(MID(Z{excel_row},SEARCH(S{excel_row},Z{excel_row}),IFERROR(SEARCH("|",Z{excel_row},SEARCH(S{excel_row},Z{excel_row}))-SEARCH(S{excel_row},Z{excel_row}),LEN(Z{excel_row})-SEARCH(S{excel_row},Z{excel_row})+1)),"해당 항로 중국통과 정보 없음"))'
                             ws.write_formula(row_idx + 1, col_w_idx, formula)
 
@@ -647,9 +637,12 @@ if f_skd:
         col_m1.metric("업로드된 총 스케줄", f"{st.session_state.total_skd_len:,}편")
         
         if st.session_state.df_res is not None:
-            restricted_count = len(st.session_state.df_res)
-            col_m2.metric("P-Route 제한 운항편", f"{restricted_count:,}편", delta=f"상세 검토 필요", delta_color="inverse")
-            col_m3.metric("안전성 상태", "주의 요망 ⚠️")
+            total_listed = len(st.session_state.df_res)
+            # 🚨 [UI 업데이트] 전체 표출 개수 중 실제로 P항로가 제한된(항로목록에 P가 포함된) 개수를 카운트
+            p_risk_count = st.session_state.df_res['항로목록'].str.contains(r'P\d', na=False, regex=True).sum()
+            
+            col_m2.metric("리포트 표출 운항편", f"{total_listed:,}편", delta=f"실제 제한편 {p_risk_count}편 포함", delta_color="inverse")
+            col_m3.metric("안전성 상태", "주의 요망 ⚠️" if p_risk_count > 0 else "정상 운항 (모니터링) 🟢")
             
             st.markdown("<br>", unsafe_allow_html=True)
             
@@ -711,6 +704,6 @@ if f_skd:
                             
                         st_folium(m, width=1400, height=650)
         else:
-            col_m2.metric("P-Route 제한 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
+            col_m2.metric("리포트 표출 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
             col_m3.metric("안전성 상태", "정상 운항 🟢")
-            st.success("✅ 태풍의 영향을 받는 Preferred Route(P항로) 제한 운항편이 없습니다.")
+            st.success("✅ 조건에 해당하는 표출 운항편이 없습니다.")
