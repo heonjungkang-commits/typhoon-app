@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v35.6] 태풍 분석 통합 시스템 (Dual Core + 정밀 에어웨이 + GIS 지도 시각화)
+# [Final v35.7] 태풍 분석 시스템 (Dual Core + P-Route 필터 + UI 보존)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -22,7 +22,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **정밀 에어웨이 모델** 및 **GIS 지도 시각화 엔진**이 활성화되었습니다.")
+    st.info("💡 **정밀 에어웨이 모델**, **P-Route 필터**, **GIS 지도 시각화**가 활성화되었습니다.")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -39,7 +39,6 @@ def load_static_db():
         wp_raw = pd.read_excel("Waypoint.xlsx")
         aw_raw = pd.read_excel("airway.xlsx")
         rte_raw = pd.read_excel("DB_ROUTE.xlsx")
-        
         try:
             fix_raw = pd.read_csv("FIX_result.csv")
         except:
@@ -134,13 +133,10 @@ class DualCoreEngine:
 
     def build_db(self):
         seen_coords = set()
-        
-        # [코어 1] GIS 데이터
         if self.fix_df is not None:
             names_fix = self.fix_df.iloc[:, 0].astype(str).str.strip().str.upper().values
             fir_fix = self.fix_df.iloc[:, 4].astype(str).str.strip().str.upper().values
             points_fix = self.fix_df.iloc[:, 5].astype(str).values
-            
             for n, fir, pt_str in zip(names_fix, fir_fix, points_fix):
                 coord = parse_wkt_point(pt_str)
                 if coord and is_valid_coord(coord):
@@ -148,32 +144,26 @@ class DualCoreEngine:
                     if (n, approx) not in seen_coords:
                         self.global_db.setdefault(n, []).append(coord)
                         seen_coords.add((n, approx))
-                    # 중국 FIR 로직 (Z로 시작하되 ZK, ZM, ZJ 제외)
                     if fir.startswith('Z') and not fir.startswith('ZK') and not fir.startswith('ZM') and not fir.startswith('ZJ'):
                         self.china_nodes.add((n, approx))
 
-        # [코어 2] Waypoint.xlsx 데이터
         names_wp = self.wp_df.iloc[:, 0].astype(str).str.strip().str.upper().values
         lats_wp = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 3].values]
         lons_wp = [dms_to_decimal(x) for x in self.wp_df.iloc[:, 4].values]
         ccs_wp = self.wp_df.iloc[:, 6].astype(str).str.strip().str.upper().values
-        
         for n, lat, lon, cc in zip(names_wp, lats_wp, lons_wp, ccs_wp):
             if is_valid_coord((lat, lon)):
                 approx = (round(lat, 2), round(lon, 2))
                 if (n, approx) not in seen_coords:
                     self.global_db.setdefault(n, []).append((lat, lon))
                     seen_coords.add((n, approx))
-                # 중국 FIR 로직 (Z로 시작하되 ZK, ZM, ZJ 제외)
                 if cc.startswith('Z') and not cc.startswith('ZK') and not cc.startswith('ZM') and not cc.startswith('ZJ'):
                     self.china_nodes.add((n, approx))
         
-        # [Airway 로드]
         ids = self.airway_df.iloc[:, 0].fillna("").astype(str).str.strip().str.upper().values
         names_aw = self.airway_df.iloc[:, 2].astype(str).str.strip().str.upper().values
         lats_aw = [dms_to_decimal(x) for x in self.airway_df.iloc[:, 4].values]
         lons_aw = [dms_to_decimal(x) for x in self.airway_df.iloc[:, 5].values]
-        
         for aid, name, lat, lon in zip(ids, names_aw, lats_aw, lons_aw):
             if not aid or not is_valid_coord((lat, lon)): continue
             approx = (round(lat, 2), round(lon, 2))
@@ -186,16 +176,13 @@ class DualCoreEngine:
     def get_route_data(self, route_name, strip, dep, arr):
         cache_key = f"{route_name}_{dep}_{arr}"
         if cache_key in self.route_cache: return self.route_cache[cache_key]
-        
         coords_info = self._build_route_raw(strip, dep, arr)
         if not coords_info: return None
-        
         coords = [pt['coord'] for pt in coords_info]
         total_dist = 0; seg_dists = [0]
         for i in range(len(coords)-1):
             d = fast_dist_nm(coords[i], coords[i+1])
             total_dist += d; seg_dists.append(seg_dists[-1] + d)
-            
         data = {'coords': coords, 'info': coords_info, 'total_dist': total_dist, 'seg_dists': seg_dists}
         self.route_cache[cache_key] = data
         return data
@@ -205,7 +192,6 @@ class DualCoreEngine:
         tokens = [t.strip().upper() for t in tokens if t.strip()]
         coords_info = []
         dep_keys, arr_keys = get_codes(dep), get_codes(arr)
-        
         final_dest = get_airport_coords(arr_keys[0]) if arr_keys else None
         if not final_dest and len(arr_keys)>1: final_dest = get_airport_coords(arr_keys[-1])
         start_c = get_airport_coords(dep_keys[0]) if dep_keys else None
@@ -282,7 +268,6 @@ class DualCoreEngine:
                             approx = (round(curr[0], 2), round(curr[1], 2))
                             is_cn = (name, approx) in self.china_nodes
                             coords_info.append({'coord': curr, 'name': name, 'is_china': is_cn})
-                            
                             current_valid_pos = curr
                         if coords_info: prev_coord = coords_info[-1]['coord']
             else:
@@ -305,13 +290,12 @@ class DualCoreEngine:
                         is_cn = (t, approx) in self.china_nodes
                         coords_info.append({'coord': sel, 'name': t, 'is_china': is_cn})
                         prev_coord = sel
-                        
         return coords_info
 
 # ---------------------------------------------------------
 # UI 메인 블록
 # ---------------------------------------------------------
-st.title("🌪️ Typhoon Flight Analyzer (GIS Map Edition)")
+st.title("🌪️ Typhoon Flight Analyzer")
 
 wp_df, aw_df, route_df, fix_df = load_static_db()
 if wp_df is None or aw_df is None or route_df is None:
@@ -329,7 +313,17 @@ with col1: f_skd = st.file_uploader("✈️ SKD_BASE 업로드", type=['xlsx'])
 with col2: f_rest = st.file_uploader("🌪️ Restrictions 업로드", type=['xlsx'])
 
 if f_skd and f_rest:
+    # 🚨 Session State 변수 초기화
+    if 'analysis_done' not in st.session_state:
+        st.session_state.analysis_done = False
+        st.session_state.df_res = None
+        st.session_state.excel_data = None
+        st.session_state.map_store = {}
+        st.session_state.typhoons = []
+
     if st.button("🚀 정밀 비행편 분석 시작", type="primary", use_container_width=True):
+        st.session_state.analysis_done = False # 새로운 분석 시작 시 초기화
+        
         with st.spinner("태풍 회피 및 영공 통과 시간을 정밀 분석 중입니다..."):
             eng = st.session_state.engine
             skd_df = pd.read_excel(f_skd)
@@ -345,13 +339,10 @@ if f_skd and f_rest:
                     })
                 except: continue
             
-            res_list = []; progress_bar = st.progress(0); status_text = st.empty()
-            
-            # [지도 데이터 보관용 딕셔너리]
-            if 'map_store' not in st.session_state:
-                st.session_state.map_store = {}
-            st.session_state.map_store.clear()
-            st.session_state.typhoons = typhoons
+            res_list = []
+            map_store = {}
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
             for idx, row in skd_df.iterrows():
                 progress_bar.progress((idx + 1) / len(skd_df))
@@ -439,7 +430,12 @@ if f_skd and f_rest:
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
+                    # 🚨 [신규 필터] P로 시작하는 항로가 제한받았을 때만 리스트에 추가
+                    has_p_risk = False
                     if risk_routes:
+                        has_p_risk = any(r_str.startswith('P') for r_str in risk_routes)
+                    
+                    if has_p_risk:
                         safe_list.sort(key=lambda x: x['dist'])
                         res_list.append({
                             'FLT': f_no, 'DATE': str(d_raw.date()), 'DEP': dep, 'ARR': arr,
@@ -456,10 +452,9 @@ if f_skd and f_rest:
                             'DIST_4': f"{safe_list[3]['dist']:.0f}" if len(safe_list)>3 else ""
                         })
                         
-                        # [지도 표출용 데이터 저장]
                         dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
                         arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
-                        st.session_state.map_store[f"{f_no} ({dep}->{arr})"] = {
+                        map_store[f"{f_no} ({dep}->{arr})"] = {
                             'dep_coord': dep_c, 'arr_coord': arr_c,
                             'routes': route_objs,
                             'risk_routes': risk_routes
@@ -468,10 +463,14 @@ if f_skd and f_rest:
                     continue
 
             status_text.empty()
+            
+            # 분석 결과 Session State에 저장 (지도 조작 시 날아가지 않도록)
+            st.session_state.map_store = map_store
+            st.session_state.typhoons = typhoons
+            
             if res_list:
                 df_res = pd.DataFrame(res_list)
-                st.success(f"🔥 총 {len(df_res)}건의 제한 운항편이 발견되었습니다!")
-                st.dataframe(df_res)
+                st.session_state.df_res = df_res
                 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -480,69 +479,73 @@ if f_skd and f_rest:
                         sub_df = df_res[df_res['DATE'] == d]
                         sub_df.to_excel(writer, index=False, sheet_name=f"RES_{d}")
                 
-                st.download_button(label="💾 최종 분석 결과 엑셀 다운로드", data=output.getvalue(), file_name="Typhoon_Analysis_Result.xlsx", mime="application/vnd.ms-excel")
+                st.session_state.excel_data = output.getvalue()
             else:
-                st.success("✅ 태풍의 영향을 받는 제한 운항편이 없습니다.")
+                st.session_state.df_res = None
+                
+            st.session_state.analysis_done = True
 
-# ---------------------------------------------------------
-# 3. 지도 시각화 (Folium) 섹션
-# ---------------------------------------------------------
-if 'map_store' in st.session_state and st.session_state.map_store:
-    st.markdown("---")
-    st.subheader("🗺️ 항로 및 태풍 정밀 시각화 지도")
-    
-    flt_list = list(st.session_state.map_store.keys())
-    selected_flt = st.selectbox("지도를 확인할 제한 운항편을 선택하세요:", ["선택하세요..."] + flt_list)
-    
-    if selected_flt != "선택하세요...":
-        m_data = st.session_state.map_store[selected_flt]
-        
-        # 지도 중심 좌표 설정 (출발/도착 중간 지점 또는 아시아 기본 설정)
-        if m_data['dep_coord'] and m_data['arr_coord']:
-            center_lat = (m_data['dep_coord'][0] + m_data['arr_coord'][0]) / 2
-            center_lon = (m_data['dep_coord'][1] + m_data['arr_coord'][1]) / 2
+    # ---------------------------------------------------------
+    # 3. 결과 표출 및 지도 시각화 (Session State 기반)
+    # ---------------------------------------------------------
+    if st.session_state.get('analysis_done'):
+        if st.session_state.df_res is not None:
+            st.success(f"🔥 총 {len(st.session_state.df_res)}건의 제한 운항편이 발견되었습니다! (Preferred Route 기준)")
+            st.dataframe(st.session_state.df_res)
+            
+            st.download_button(
+                label="💾 최종 분석 결과 엑셀 다운로드", 
+                data=st.session_state.excel_data, 
+                file_name="Typhoon_Analysis_Result.xlsx", 
+                mime="application/vnd.ms-excel"
+            )
+            
+            if st.session_state.map_store:
+                st.markdown("---")
+                st.subheader("🗺️ 항로 및 태풍 정밀 시각화 지도")
+                
+                flt_list = list(st.session_state.map_store.keys())
+                selected_flt = st.selectbox("지도를 확인할 제한 운항편을 선택하세요:", ["선택하세요..."] + flt_list)
+                
+                if selected_flt != "선택하세요...":
+                    m_data = st.session_state.map_store[selected_flt]
+                    
+                    if m_data['dep_coord'] and m_data['arr_coord']:
+                        center_lat = (m_data['dep_coord'][0] + m_data['arr_coord'][0]) / 2
+                        center_lon = (m_data['dep_coord'][1] + m_data['arr_coord'][1]) / 2
+                    else:
+                        center_lat, center_lon = 30.0, 125.0
+                        
+                    m = folium.Map(location=[center_lat, center_lon], zoom_start=4)
+                    
+                    for ty in st.session_state.typhoons:
+                        folium.Circle(
+                            location=ty['c'],
+                            radius=ty['r'] * 1852,
+                            color='red', weight=2, fill=True, fill_color='red', fill_opacity=0.3,
+                            tooltip=f"태풍 {ty['n']} (반경 {ty['r']}nm)"
+                        ).add_to(m)
+                        
+                    for r in m_data['routes']:
+                        r_name = r['name']
+                        coords = [pt['coord'] for pt in r['data']['info']]
+                        is_risk = any(r_name in r_str for r_str in m_data['risk_routes'])
+                        
+                        color = 'red' if is_risk else 'blue'
+                        weight = 4 if is_risk else 2
+                        
+                        folium.PolyLine(
+                            locations=coords,
+                            color=color,
+                            weight=weight,
+                            tooltip=f"{r_name} 항로 ({'위험 - 태풍 제한' if is_risk else '안전 - 우회 추천'})"
+                        ).add_to(m)
+                        
+                    if m_data['dep_coord']:
+                        folium.Marker(m_data['dep_coord'], popup="Departure", icon=folium.Icon(color='green', icon='plane')).add_to(m)
+                    if m_data['arr_coord']:
+                        folium.Marker(m_data['arr_coord'], popup="Arrival", icon=folium.Icon(color='blue', icon='flag')).add_to(m)
+                        
+                    st_folium(m, width=1200, height=600)
         else:
-            center_lat, center_lon = 30.0, 125.0 # Asia Default
-            
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=4)
-        
-        # 1. 태풍 반경 표출 (빨간색 원)
-        for ty in st.session_state.typhoons:
-            folium.Circle(
-                location=ty['c'],
-                radius=ty['r'] * 1852, # nm 단위를 미터(m)로 변환
-                color='red',
-                weight=2,
-                fill=True,
-                fill_color='red',
-                fill_opacity=0.3,
-                tooltip=f"태풍 {ty['n']} (반경 {ty['r']}nm)"
-            ).add_to(m)
-            
-        # 2. 항로 표출 (위험=빨강, 안전=파랑)
-        for r in m_data['routes']:
-            r_name = r['name']
-            coords = [pt['coord'] for pt in r['data']['info']]
-            
-            # 이 항로가 위험 리스트에 포함되어 있는지 확인
-            is_risk = any(r_name in r_str for r_str in m_data['risk_routes'])
-            
-            color = 'red' if is_risk else 'blue'
-            weight = 4 if is_risk else 2
-            dash_array = None if is_risk else '5, 5' # 안전 항로는 점선 처리 등 시각적 효과 추가 가능
-            
-            folium.PolyLine(
-                locations=coords,
-                color=color,
-                weight=weight,
-                tooltip=f"{r_name} 항로 ({'위험 - 태풍 제한' if is_risk else '안전 - 우회 추천'})"
-            ).add_to(m)
-            
-        # 3. 공항 마커 표출
-        if m_data['dep_coord']:
-            folium.Marker(m_data['dep_coord'], popup="Departure", icon=folium.Icon(color='green', icon='plane')).add_to(m)
-        if m_data['arr_coord']:
-            folium.Marker(m_data['arr_coord'], popup="Arrival", icon=folium.Icon(color='blue', icon='flag')).add_to(m)
-            
-        # Streamlit에 지도 렌더링
-        st_folium(m, width=1200, height=600)
+            st.success("✅ 태풍의 영향을 받는 Preferred Route(P항로) 제한 운항편이 없습니다.")
