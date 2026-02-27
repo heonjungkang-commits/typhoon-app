@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v38.6] 태풍 분석 시스템 (GIS 항로명 플로팅 적용)
+# [Final v38.7] 태풍 분석 시스템 
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- P항로 무사 시 제한목록 블라인드 [ON]\n- 엑셀 시트 분리 [ON]\n- 태풍 Form 입력 안정화 [ON]\n- **GIS 항로명 다이렉트 플로팅 [ON]**")
+    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- 엑셀 시트 분리 [ON]\n- 태풍 Form 입력 안정화 [ON]\n- **GIS 항로 텍스트 뱃지 최적화 [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -695,7 +695,6 @@ if f_skd:
                             color = 'red' if is_risk else '#2563EB'
                             weight = 4 if is_risk else 2
                             
-                            # 선 긋기
                             folium.PolyLine(
                                 locations=coords,
                                 color=color,
@@ -703,13 +702,14 @@ if f_skd:
                                 tooltip=f"{r_name} 항로"
                             ).add_to(m)
                             
-                            # 🚨 [신규] 항로 중간 지점에 다이렉트로 항로명(P01, W12A 등) 플로팅 뱃지 삽입
+                            # 🚨 [변경됨] 컨테이너 사이즈(0,0)와 inline-block 속성으로 텍스트 핏 완벽 조절
                             if len(coords) > 0:
                                 mid_idx = len(coords) // 2
                                 mid_coord = coords[mid_idx]
                                 
                                 html_label = f"""
                                 <div style="
+                                    display: inline-block;
                                     font-size: 10pt; 
                                     color: {color}; 
                                     font-weight: bold; 
@@ -725,7 +725,10 @@ if f_skd:
                                 """
                                 folium.Marker(
                                     location=mid_coord,
-                                    icon=folium.DivIcon(html=html_label)
+                                    icon=folium.DivIcon(
+                                        html=html_label,
+                                        icon_size=(0, 0) # Leaflet 기본 컨테이너 렌더링을 지우고 텍스트 크기에 딱 맞춤
+                                    )
                                 ).add_to(m)
                             
                         if m_data['dep_coord']:
