@@ -645,7 +645,7 @@ if f_skd:
         
         if st.session_state.df_res is not None:
             total_listed = len(st.session_state.df_res)
-            p_risk_count = st.session_state.df_res['항로목록'].astype(str).str.contains(r'P\d', na=False, regex=True).sum()
+            p_risk_count = st.session_state.df_res['제한목록'].astype(str).str.contains(r'P\d', na=False, regex=True).sum()
             
             col_m2.metric("리포트 표출 운항편", f"{total_listed:,}편", delta=f"실제 제한편 {p_risk_count}편 포함", delta_color="inverse")
             col_m3.metric("안전성 상태", "주의 요망 ⚠️" if p_risk_count > 0 else "정상 운항 (모니터링) 🟢")
@@ -743,5 +743,6 @@ if f_skd:
             col_m2.metric("리포트 표출 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
             col_m3.metric("안전성 상태", "정상 운항 🟢")
             st.success("✅ 조건에 해당하는 표출 운항편이 없습니다.")
+
 
 
