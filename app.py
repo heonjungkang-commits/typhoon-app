@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v37.1] 태풍 분석 시스템 (모든 항로 타입 추천 허용)
+# [Final v37.2] 태풍 분석 시스템 (P, W, T 항로 필터링 적용)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 필터 [ON]\n- 모든 타입 항로(T, Q 등) 추천 [ON]")
+    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 제한 기준 필터 [ON]\n- **탐색 대상: P, W, T 항로 [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -347,6 +347,7 @@ else:
             st.session_state.engine = DualCoreEngine(wp_df, aw_df, route_df, fix_df)
             st.session_state.engine.build_db()
 
+# UI 레이아웃 분리
 col_left, col_right = st.columns([1, 1.2], gap="large")
 
 with col_left:
@@ -452,7 +453,11 @@ if f_skd:
                     route_objs = []
                     for _, r in matched_routes.iterrows():
                         r_name = str(r.iloc[2]).strip().upper()
-                        # 🚨 [버그 수정] P, W 항로 필터링 완전 삭제! T, Z, Q 등 모든 항로 허용
+                        
+                        # 🚨 [신규 필터]: P, W, T 로 시작하는 항로만 분석 대상으로 수집
+                        if not (r_name.startswith('P') or r_name.startswith('W') or r_name.startswith('T')):
+                            continue
+                            
                         r_data = eng.get_route_data(r_name, str(r.iloc[4]), dep, arr)
                         if r_data: route_objs.append({'name': r_name, 'data': r_data})
                         
@@ -506,6 +511,7 @@ if f_skd:
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
+                    # 제한 판별의 핵심: 제한된 항로 중에 'P' 항로가 있을 때만 경고 리스트에 담음
                     has_p_risk = False
                     if risk_routes:
                         has_p_risk = any(r_str.startswith('P') for r_str in risk_routes)
