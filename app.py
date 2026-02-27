@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v37.0] 태풍 분석 시스템 (Professional UI Dashboard)
+# [Final v37.1] 태풍 분석 시스템 (모든 항로 타입 추천 허용)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -17,30 +17,24 @@ from streamlit_folium import st_folium
 # ---------------------------------------------------------
 st.set_page_config(page_title="Typhoon Flight Analyzer", layout="wide", page_icon="✈️")
 
-# 커스텀 CSS를 통해 프로페셔널한 느낌 부여
 st.markdown("""
     <style>
-    /* 전체 여백 조절 */
     .block-container { padding-top: 2rem; padding-bottom: 2rem; }
-    /* 제목 폰트 색상 및 스타일 */
     h1 { color: #1E3A8A; font-weight: 700; margin-bottom: 1rem; }
     h2, h3 { color: #2563EB; font-weight: 600; margin-top: 1rem; }
-    /* 버튼 스타일 */
     .stButton>button { border-radius: 8px; font-weight: bold; height: 3rem; }
-    /* 데이터프레임 헤더 */
     th { background-color: #F3F4F6 !important; color: #111827 !important; }
-    /* 알림창 둥근 모서리 */
     .stAlert { border-radius: 8px; }
     </style>
 """, unsafe_allow_html=True)
 
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/3211/3211184.png", width=60) # 심플한 비행기 아이콘
+    st.image("https://cdn-icons-png.flaticon.com/512/3211/3211184.png", width=60)
     st.header("⚙️ 시스템 설정")
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 필터 [ON]\n- UI 최적화 [ON]")
+    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 필터 [ON]\n- 모든 타입 항로(T, Q 등) 추천 [ON]")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -353,7 +347,6 @@ else:
             st.session_state.engine = DualCoreEngine(wp_df, aw_df, route_df, fix_df)
             st.session_state.engine.build_db()
 
-# UI 레이아웃 분리 (상단 2개 컬럼)
 col_left, col_right = st.columns([1, 1.2], gap="large")
 
 with col_left:
@@ -387,7 +380,6 @@ if f_skd:
     if st.button("🚀 정밀 비행편 분석 시작", type="primary", use_container_width=True):
         st.session_state.analysis_done = False 
         
-        # 최신 UI Status Bar 적용
         with st.status("🔍 정밀 비행편 분석 진행 중...", expanded=True) as status:
             eng = st.session_state.engine
             
@@ -460,7 +452,7 @@ if f_skd:
                     route_objs = []
                     for _, r in matched_routes.iterrows():
                         r_name = str(r.iloc[2]).strip().upper()
-                        if not (r_name.startswith('P') or r_name.startswith('W')): continue
+                        # 🚨 [버그 수정] P, W 항로 필터링 완전 삭제! T, Z, Q 등 모든 항로 허용
                         r_data = eng.get_route_data(r_name, str(r.iloc[4]), dep, arr)
                         if r_data: route_objs.append({'name': r_name, 'data': r_data})
                         
@@ -593,7 +585,6 @@ if f_skd:
                 
             st.session_state.analysis_done = True
             
-            # 분석 완료 시 상태바 정리
             status.update(label="✅ 데이터 분석 완료", state="complete", expanded=False)
 
     # ---------------------------------------------------------
@@ -603,7 +594,6 @@ if f_skd:
         st.markdown("---")
         st.subheader("💡 분석 요약 리포트")
         
-        # [상단 요약 메트릭]
         col_m1, col_m2, col_m3 = st.columns(3)
         col_m1.metric("업로드된 총 스케줄", f"{st.session_state.total_skd_len:,}편")
         
@@ -614,7 +604,6 @@ if f_skd:
             
             st.markdown("<br>", unsafe_allow_html=True)
             
-            # [결과 탭 분리]
             tab1, tab2 = st.tabs(["📊 상세 분석 테이블", "🗺️ GIS 항로 시각화"])
             
             with tab1:
@@ -655,7 +644,7 @@ if f_skd:
                             coords = [pt['coord'] for pt in r['data']['info']]
                             is_risk = any(r_name in r_str for r_str in m_data['risk_routes'])
                             
-                            color = 'red' if is_risk else '#2563EB' # 블루
+                            color = 'red' if is_risk else '#2563EB'
                             weight = 4 if is_risk else 2
                             
                             folium.PolyLine(
@@ -674,4 +663,4 @@ if f_skd:
         else:
             col_m2.metric("P-Route 제한 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
             col_m3.metric("안전성 상태", "정상 운항 🟢")
-            st.success("✅ 태풍의 영향을 받는 제한 운항편이 없습니다.")
+            st.success("✅ 태풍의 영향을 받는 Preferred Route(P항로) 제한 운항편이 없습니다.")
