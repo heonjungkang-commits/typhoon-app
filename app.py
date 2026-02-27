@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v37.4] 태풍 분석 시스템 (CHN Route 엑셀 드롭다운 적용)
+# [Final v38.0] 태풍 분석 시스템 (엑셀 동적 수식 및 드롭다운 연동)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- 탐색 대상: P, W, T 항로 [ON]\n- 입력 데이터 자동 저장 [ON]\n- **엑셀 드롭다운 UI [ON]**")
+    st.info("💡 **엔진 상태:**\n- P-Route 제한 기준 필터 [ON]\n- 탐색 대상: P, W, T 항로 [ON]\n- **엑셀 동적 수식(Formula) 연동 [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -530,6 +530,8 @@ if f_skd:
                         
                         s_xx_val = get_s_xx(dep, arr, sxx_dict)
                         
+                        # 파이썬 데이터 조립 시 '중국통과우회항로'는 비워두고(수식이 들어갈 자리), 
+                        # 'Hidden_CHN_Info'에 파이프(|)로 구분된 원본 문자열을 숨겨서 전달합니다.
                         res_list.append({
                             'BND': bound_val,
                             'DATE': str(d_raw.date()),
@@ -540,7 +542,6 @@ if f_skd:
                             'STA': t_sta.strftime("%H:%M"),
                             'AC': ac_type, 
                             'C_RTE': s_xx_val,
-                            '예보시간': "", 
                             '항로목록': ", ".join(risk_routes),
                             '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
                             'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
@@ -554,9 +555,10 @@ if f_skd:
                             '승무 구성': "",
                             '허가신청자': "",
                             '허가 필요 국가': "",
-                            'CHN Route Code': ", ".join(china_transit_list) if china_transit_list else "", # 콤마로 저장
+                            '중국통과우회항로': "", # Formula가 덮어쓸 자리
                             '허가 신청': "",
-                            '허가 취득': ""
+                            '허가 취득': "",
+                            'Hidden_CHN_Info': "|".join(china_transit_list) if china_transit_list else "N/A"
                         })
                         
                         dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
@@ -572,59 +574,59 @@ if f_skd:
             st.session_state.map_store = map_store
             st.session_state.typhoons = typhoons
             
-            st.write("3. 결과 엑셀 리포트 포맷팅 생성 중...")
+            st.write("3. 엑셀 동적 함수(Formula) 및 사내 폼 매핑 중...")
             if res_list:
                 df_res = pd.DataFrame(res_list)
                 
+                # '예보시간'이 빠진 최종 컬럼 리스트 (총 26개)
                 df_res.columns = [
-                    'BND', 'DATE', 'FLT', 'FR', 'TO', 'STD', 'STA', 'AC', 'C_RTE', '예보시간', 
+                    'BND', 'DATE', 'FLT', 'FR', 'TO', 'STD', 'STA', 'AC', 'C_RTE', 
                     '항로목록', '항로명', 'F/T 증가', '항로명 ', 'F/T 증가 ', '항로명  ', 'F/T 증가  ', '항로명   ', 'F/T 증가   ', 
-                    '최종 사용항로', '승무 구성', '허가신청자', '허가 필요 국가', 'CHN Route Code', '허가 신청', '허가 취득'
+                    '최종 사용항로', '승무 구성', '허가신청자', '허가 필요 국가', '중국통과우회항로', '허가 신청', '허가 취득', 'Hidden_CHN_Info'
                 ]
                 
                 st.session_state.df_res = df_res
                 
-                # 🚨 [신규] 엑셀 쓰기 과정에 Data Validation (드롭다운) 적용 로직 투입
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_res.to_excel(writer, index=False, sheet_name='Summary')
                     
-                    def apply_dropdown_to_sheet(ws, df):
-                        try:
-                            col_idx = df.columns.get_loc('CHN Route Code')
-                            ws.set_column(col_idx, col_idx, 35) # 컬럼 너비를 넓게 조정
-                            for r_idx, val in enumerate(df['CHN Route Code']):
-                                if isinstance(val, str) and val.strip() and val != "N/A":
-                                    # 콤마 기준으로 쪼개서 리스트 생성
-                                    opts = [x.strip() for x in val.split(',')]
-                                    if opts:
-                                        # 셀의 기본값으로 제일 첫 번째 항목을 써줌
-                                        ws.write_string(r_idx + 1, col_idx, opts[0])
-                                        
-                                        if len(opts) > 1:
-                                            # Excel 데이터 유효성 검사 (드롭다운) 글자 수 255자 제한 방어
-                                            valid_opts = []
-                                            c_len = 0
-                                            for o in opts:
-                                                if c_len + len(o) + 1 <= 255:
-                                                    valid_opts.append(o)
-                                                    c_len += len(o) + 1
-                                            
-                                            # 드롭다운 삽입!
-                                            ws.data_validation(r_idx + 1, col_idx, r_idx + 1, col_idx, {
-                                                'validate': 'list',
-                                                'source': valid_opts
-                                            })
-                        except Exception: pass
+                    def format_dynamic_excel(ws, df):
+                        col_s_idx = df.columns.get_loc('최종 사용항로') # 18번 인덱스
+                        col_w_idx = df.columns.get_loc('중국통과우회항로') # 22번 인덱스
+                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info') # 25번 인덱스
+                        
+                        ws.set_column(col_w_idx, col_w_idx, 35) # 넓이 확장
+                        ws.set_column(col_z_idx, col_z_idx, None, None, {'hidden': 1}) # 데이터 숨김 처리
+                        
+                        for row_idx in range(len(df)):
+                            excel_row = row_idx + 2
+                            
+                            # 1. '최종 사용항로' 칸에 추천 항로 4개를 드롭다운 목록으로 삽입!
+                            valid_opts = []
+                            for i in [10, 12, 14, 16]: # 각 항로명 컬럼 인덱스
+                                val = str(df.iloc[row_idx, i]).strip()
+                                if val and val != "N/A":
+                                    valid_opts.append(val)
+                            
+                            if valid_opts:
+                                ws.data_validation(row_idx + 1, col_s_idx, row_idx + 1, col_s_idx, {
+                                    'validate': 'list',
+                                    'source': valid_opts
+                                })
+                            
+                            # 2. '중국통과우회항로' 칸에 엑셀 MID/SEARCH 함수 삽입
+                            # 사용자가 최종 사용항로(S열)를 선택하면 -> 숨겨진 Z열에서 해당 정보를 찾아내 표출시킴
+                            formula = f'=IF(ISBLANK(S{excel_row}),"",IFERROR(MID(Z{excel_row},SEARCH(S{excel_row},Z{excel_row}),IFERROR(SEARCH("|",Z{excel_row},SEARCH(S{excel_row},Z{excel_row}))-SEARCH(S{excel_row},Z{excel_row}),LEN(Z{excel_row})-SEARCH(S{excel_row},Z{excel_row})+1)),"해당 항로 중국통과 정보 없음"))'
+                            ws.write_formula(row_idx + 1, col_w_idx, formula)
+
+                    format_dynamic_excel(writer.sheets['Summary'], df_res)
                     
-                    apply_dropdown_to_sheet(writer.sheets['Summary'], df_res)
-                    
-                    # 일자별 시트 생성 및 드롭다운 동일 적용
                     for d in df_res['DATE'].unique():
                         sub_df = df_res[df_res['DATE'] == d]
                         sheet_name = f"RES_{d}"
                         sub_df.to_excel(writer, index=False, sheet_name=sheet_name)
-                        apply_dropdown_to_sheet(writer.sheets[sheet_name], sub_df)
+                        format_dynamic_excel(writer.sheets[sheet_name], sub_df)
                 
                 st.session_state.excel_data = output.getvalue()
             else:
@@ -655,12 +657,13 @@ if f_skd:
             
             with tab1:
                 st.download_button(
-                    label="💾 엑셀 리포트 다운로드 (사내 포맷 적용)", 
+                    label="💾 엑셀 리포트 다운로드 (동적 수식 적용)", 
                     data=st.session_state.excel_data, 
                     file_name="Typhoon_Analysis_Result_Formatted.xlsx", 
                     mime="application/vnd.ms-excel"
                 )
-                st.dataframe(st.session_state.df_res, use_container_width=True, height=500)
+                # 웹 화면 표에서는 지저분한 히든 컬럼을 제거하고 깔끔하게 보여줍니다.
+                st.dataframe(st.session_state.df_res.drop(columns=['Hidden_CHN_Info']), use_container_width=True, height=500)
                 
             with tab2:
                 if st.session_state.map_store:
