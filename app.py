@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v38.2] 태풍 분석 시스템 (스마트 필터링 및 시트 자동 분할)
+# [Final v38.3] 태풍 분석 시스템 (항로목록 P-Route 종속 필터링)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- CHN/SEA 정상편 우회추천 블라인드 [ON]\n- 실제 제한편만 GIS 표출 [ON]\n- 엑셀 시트 분리 (바운드+날짜) [ON]")
+    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- **P항로 무사 시 제한목록 블라인드 [ON]**\n- 실제 제한편만 GIS 표출 [ON]\n- 엑셀 시트 분리 (바운드+날짜) [ON]")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -528,11 +528,14 @@ if f_skd:
                     s_xx_val = get_s_xx(dep, arr, sxx_dict)
                     
                     if bound_val in ['CHN', 'SEA'] or has_p_risk:
-                        # 🚨 [변경됨]: 위험이 없다면 혼란을 방지하기 위해 추천 항로 리스트를 비웁니다.
+                        # 🚨 [변경됨]: P항로가 무사하다면(즉, has_p_risk가 False)
+                        # 혼란을 막기 위해 우회 항로 추천(safe_list)과 제한 목록 표시(risk_routes_str)를 완전히 비워버립니다.
                         if not has_p_risk:
                             safe_list = []
+                            risk_routes_str = ""
                         else:
                             safe_list.sort(key=lambda x: x['ft_inc']) 
+                            risk_routes_str = ", ".join(risk_routes)
                         
                         res_list.append({
                             'BND': bound_val,
@@ -544,7 +547,7 @@ if f_skd:
                             'STA': t_sta.strftime("%H:%M"),
                             'AC': ac_type, 
                             'C_RTE': s_xx_val,
-                            '항로목록': ", ".join(risk_routes) if risk_routes else "",
+                            '항로목록': risk_routes_str, # 필터링된 제한 목록
                             '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "",
                             'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
                             '항로명_2': safe_list[1]['name'] if len(safe_list)>1 else "",
@@ -563,7 +566,7 @@ if f_skd:
                             'Hidden_CHN_Info': "|".join(china_transit_list) if china_transit_list else ""
                         })
                         
-                        # 🚨 [변경됨]: 실제 제한편만 GIS 맵핑 데이터에 저장하여 지도를 깔끔하게 만듭니다.
+                        # 지도에는 여전히 P항로 제한을 받는 진짜 위험편만 담습니다.
                         if has_p_risk:
                             dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
                             arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
@@ -592,15 +595,14 @@ if f_skd:
                 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    # 전체 요약 시트
                     df_res.to_excel(writer, index=False, sheet_name='Summary')
                     
                     def format_dynamic_excel(ws, df):
-                        col_w_idx = df.columns.get_loc('중국통과우회항로')
-                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info')
+                        col_w_idx = df.columns.get_loc('중국통과우회항로') 
+                        col_z_idx = df.columns.get_loc('Hidden_CHN_Info') 
                         
                         ws.set_column(col_w_idx, col_w_idx, 35) 
-                        ws.set_column(col_z_idx, col_z_idx, None, None, {'hidden': 1})
+                        ws.set_column(col_z_idx, col_z_idx, None, None, {'hidden': 1}) 
                         
                         for row_idx in range(len(df)):
                             excel_row = row_idx + 2
@@ -609,10 +611,8 @@ if f_skd:
 
                     format_dynamic_excel(writer.sheets['Summary'], df_res)
                     
-                    # 🚨 [변경됨]: 바운드(CHN, SEA, ETC)와 날짜를 조합하여 다중 시트 생성
                     for d in df_res['DATE'].unique():
                         df_date = df_res[df_res['DATE'] == d]
-                        
                         for bnd_type in ['CHN', 'SEA', 'ETC']:
                             if bnd_type == 'ETC':
                                 sub_df = df_date[~df_date['BND'].isin(['CHN', 'SEA'])]
@@ -620,7 +620,6 @@ if f_skd:
                                 sub_df = df_date[df_date['BND'] == bnd_type]
                                 
                             if not sub_df.empty:
-                                # 엑셀 시트명 31자 제한을 맞추기 위해 글자수 조정
                                 sheet_name = f"{bnd_type}_{d}"[-31:]
                                 sub_df.to_excel(writer, index=False, sheet_name=sheet_name)
                                 format_dynamic_excel(writer.sheets[sheet_name], sub_df)
