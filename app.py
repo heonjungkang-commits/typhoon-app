@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v38.3] 태풍 분석 시스템 (항로목록 P-Route 종속 필터링)
+# [Final v38.4] 태풍 분석 시스템 (폼 입력 안정화 및 GIS 웨이포인트 표출)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- **P항로 무사 시 제한목록 블라인드 [ON]**\n- 실제 제한편만 GIS 표출 [ON]\n- 엑셀 시트 분리 (바운드+날짜) [ON]")
+    st.info("💡 **엔진 상태:**\n- CHN/SEA 전체 표출 [ON]\n- P항로 무사 시 제한목록 블라인드 [ON]\n- 엑셀 시트 분리 [ON]\n- **태풍 Form 입력 안정화 [ON]**\n- **GIS 웨이포인트 마커 표출 [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -356,7 +356,7 @@ with col_left:
 
 with col_right:
     st.subheader("🌪️ 2. 태풍 데이터 입력")
-    st.caption("표를 클릭하여 직접 수정/추가할 수 있습니다.")
+    st.caption("표에 태풍을 추가/수정한 후, 반드시 **[데이터 저장]** 버튼을 눌러야 반영됩니다.")
     
     if 'typhoon_input_data' not in st.session_state:
         st.session_state.typhoon_input_data = pd.DataFrame({
@@ -368,13 +368,18 @@ with col_right:
             '반경(nm)': [300.0, None, None]
         })
 
-    edited_typhoons = st.data_editor(
-        st.session_state.typhoon_input_data, 
-        num_rows="dynamic", 
-        use_container_width=True, 
-        height=210
-    )
-    st.session_state.typhoon_input_data = edited_typhoons
+    # 🚨 [신규] form을 사용하여 실시간 리런(Rerun) 방지
+    with st.form("typhoon_input_form"):
+        edited_typhoons = st.data_editor(
+            st.session_state.typhoon_input_data, 
+            num_rows="dynamic", 
+            use_container_width=True, 
+            height=210
+        )
+        submitted = st.form_submit_button("💾 태풍 데이터 임시 저장")
+        if submitted:
+            st.session_state.typhoon_input_data = edited_typhoons
+            st.success("태풍 데이터가 저장되었습니다! 아래 '분석 시작'을 눌러주세요.")
 
 if f_skd:
     if 'analysis_done' not in st.session_state:
@@ -405,7 +410,8 @@ if f_skd:
             st.session_state.total_skd_len = len(skd_df)
             
             typhoons = []
-            for _, r in edited_typhoons.iterrows():
+            # session_state에 저장된 데이터를 불러와서 태풍 분석에 사용
+            for _, r in st.session_state.typhoon_input_data.iterrows():
                 try:
                     if pd.isna(r['위도(Lat)']) or pd.isna(r['경도(Lon)']) or not str(r['태풍명']).strip(): continue
                     typhoons.append({
@@ -528,8 +534,6 @@ if f_skd:
                     s_xx_val = get_s_xx(dep, arr, sxx_dict)
                     
                     if bound_val in ['CHN', 'SEA'] or has_p_risk:
-                        # 🚨 [변경됨]: P항로가 무사하다면(즉, has_p_risk가 False)
-                        # 혼란을 막기 위해 우회 항로 추천(safe_list)과 제한 목록 표시(risk_routes_str)를 완전히 비워버립니다.
                         if not has_p_risk:
                             safe_list = []
                             risk_routes_str = ""
@@ -547,7 +551,7 @@ if f_skd:
                             'STA': t_sta.strftime("%H:%M"),
                             'AC': ac_type, 
                             'C_RTE': s_xx_val,
-                            '항로목록': risk_routes_str, # 필터링된 제한 목록
+                            '항로목록': risk_routes_str, 
                             '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "",
                             'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
                             '항로명_2': safe_list[1]['name'] if len(safe_list)>1 else "",
@@ -566,7 +570,6 @@ if f_skd:
                             'Hidden_CHN_Info': "|".join(china_transit_list) if china_transit_list else ""
                         })
                         
-                        # 지도에는 여전히 P항로 제한을 받는 진짜 위험편만 담습니다.
                         if has_p_risk:
                             dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
                             arr_c = get_airport_coords(arr_keys[0]) if arr_keys else None
@@ -678,6 +681,7 @@ if f_skd:
                             
                         m = folium.Map(location=[center_lat, center_lon], zoom_start=4)
                         
+                        # 태풍 원형 그리기
                         for ty in st.session_state.typhoons:
                             folium.Circle(
                                 location=ty['c'],
@@ -686,6 +690,7 @@ if f_skd:
                                 tooltip=f"태풍 {ty['n']} (반경 {ty['r']}nm)"
                             ).add_to(m)
                             
+                        # 항로 라인 및 🚨 [신규] 웨이포인트(WPT) 마커 그리기
                         for r in m_data['routes']:
                             r_name = r['name']
                             coords = [pt['coord'] for pt in r['data']['info']]
@@ -694,12 +699,26 @@ if f_skd:
                             color = 'red' if is_risk else '#2563EB'
                             weight = 4 if is_risk else 2
                             
+                            # 선 긋기
                             folium.PolyLine(
                                 locations=coords,
                                 color=color,
                                 weight=weight,
                                 tooltip=f"{r_name} 항로 ({'위험 - 태풍 제한' if is_risk else '안전 - 우회 추천'})"
                             ).add_to(m)
+                            
+                            # 웨이포인트(WPT) 마커 찍기 (이름이 없는 가상 내삽점 제외)
+                            for pt in r['data']['info']:
+                                if pt['name'] and pt['name'] not in [selected_flt.split('(')[1][:4], selected_flt.split('->')[1][:-1]]:
+                                    folium.CircleMarker(
+                                        location=pt['coord'],
+                                        radius=3, # 마커 크기
+                                        color=color,
+                                        fill=True,
+                                        fill_color='white',
+                                        fill_opacity=0.8,
+                                        tooltip=f"WPT: {pt['name']}" # 마우스 올리면 웨이포인트 이름 노출
+                                    ).add_to(m)
                             
                         if m_data['dep_coord']:
                             folium.Marker(m_data['dep_coord'], popup="Departure", icon=folium.Icon(color='green', icon='plane')).add_to(m)
