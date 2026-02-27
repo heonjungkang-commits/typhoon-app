@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v37.3] 태풍 분석 시스템 (데이터 증발 방지 Session State 적용)
+# [Final v37.4] 태풍 분석 시스템 (CHN Route 엑셀 드롭다운 적용)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 제한 기준 필터 [ON]\n- 탐색 대상: P, W, T 항로 [ON]\n- **입력 데이터 자동 저장 [ON]**")
+    st.info("💡 **엔진 상태:**\n- 탐색 대상: P, W, T 항로 [ON]\n- 입력 데이터 자동 저장 [ON]\n- **엑셀 드롭다운 UI [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -356,9 +356,8 @@ with col_left:
 
 with col_right:
     st.subheader("🌪️ 2. 태풍 데이터 입력")
-    st.caption("표를 클릭하여 여러 개의 태풍을 자유롭게 추가/수정하세요. (자동 저장됨)")
+    st.caption("표를 클릭하여 직접 수정/추가할 수 있습니다.")
     
-    # 🚨 [신규] Session State를 이용한 데이터 증발 방지
     if 'typhoon_input_data' not in st.session_state:
         st.session_state.typhoon_input_data = pd.DataFrame({
             '태풍명': ['HINNAMNOR', '', ''],
@@ -369,15 +368,12 @@ with col_right:
             '반경(nm)': [300.0, None, None]
         })
 
-    # 메모리(Session State)에 저장된 데이터를 불러와서 에디터에 표시
     edited_typhoons = st.data_editor(
         st.session_state.typhoon_input_data, 
         num_rows="dynamic", 
         use_container_width=True, 
         height=210
     )
-    
-    # 에디터에서 수정된 사항을 즉시 메모리에 덮어쓰기 (새로고침 되어도 날아가지 않음)
     st.session_state.typhoon_input_data = edited_typhoons
 
 if f_skd:
@@ -465,7 +461,6 @@ if f_skd:
                     for _, r in matched_routes.iterrows():
                         r_name = str(r.iloc[2]).strip().upper()
                         
-                        # 🚨 [유지] P, W, T 항로만 분석 대상에 포함시키는 필터
                         if not (r_name.startswith('P') or r_name.startswith('W') or r_name.startswith('T')): 
                             continue
                             
@@ -559,7 +554,7 @@ if f_skd:
                             '승무 구성': "",
                             '허가신청자': "",
                             '허가 필요 국가': "",
-                            'CHN Route Code': ", ".join(china_transit_list) if china_transit_list else "",
+                            'CHN Route Code': ", ".join(china_transit_list) if china_transit_list else "", # 콤마로 저장
                             '허가 신청': "",
                             '허가 취득': ""
                         })
@@ -577,6 +572,7 @@ if f_skd:
             st.session_state.map_store = map_store
             st.session_state.typhoons = typhoons
             
+            st.write("3. 결과 엑셀 리포트 포맷팅 생성 중...")
             if res_list:
                 df_res = pd.DataFrame(res_list)
                 
@@ -588,12 +584,47 @@ if f_skd:
                 
                 st.session_state.df_res = df_res
                 
+                # 🚨 [신규] 엑셀 쓰기 과정에 Data Validation (드롭다운) 적용 로직 투입
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     df_res.to_excel(writer, index=False, sheet_name='Summary')
+                    
+                    def apply_dropdown_to_sheet(ws, df):
+                        try:
+                            col_idx = df.columns.get_loc('CHN Route Code')
+                            ws.set_column(col_idx, col_idx, 35) # 컬럼 너비를 넓게 조정
+                            for r_idx, val in enumerate(df['CHN Route Code']):
+                                if isinstance(val, str) and val.strip() and val != "N/A":
+                                    # 콤마 기준으로 쪼개서 리스트 생성
+                                    opts = [x.strip() for x in val.split(',')]
+                                    if opts:
+                                        # 셀의 기본값으로 제일 첫 번째 항목을 써줌
+                                        ws.write_string(r_idx + 1, col_idx, opts[0])
+                                        
+                                        if len(opts) > 1:
+                                            # Excel 데이터 유효성 검사 (드롭다운) 글자 수 255자 제한 방어
+                                            valid_opts = []
+                                            c_len = 0
+                                            for o in opts:
+                                                if c_len + len(o) + 1 <= 255:
+                                                    valid_opts.append(o)
+                                                    c_len += len(o) + 1
+                                            
+                                            # 드롭다운 삽입!
+                                            ws.data_validation(r_idx + 1, col_idx, r_idx + 1, col_idx, {
+                                                'validate': 'list',
+                                                'source': valid_opts
+                                            })
+                        except Exception: pass
+                    
+                    apply_dropdown_to_sheet(writer.sheets['Summary'], df_res)
+                    
+                    # 일자별 시트 생성 및 드롭다운 동일 적용
                     for d in df_res['DATE'].unique():
                         sub_df = df_res[df_res['DATE'] == d]
-                        sub_df.to_excel(writer, index=False, sheet_name=f"RES_{d}")
+                        sheet_name = f"RES_{d}"
+                        sub_df.to_excel(writer, index=False, sheet_name=sheet_name)
+                        apply_dropdown_to_sheet(writer.sheets[sheet_name], sub_df)
                 
                 st.session_state.excel_data = output.getvalue()
             else:
