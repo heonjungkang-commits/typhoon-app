@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v37.2] 태풍 분석 시스템 (P, W, T 항로 필터링 적용)
+# [Final v37.3] 태풍 분석 시스템 (데이터 증발 방지 Session State 적용)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -34,7 +34,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 정밀 연산", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600, step=50)
     st.markdown("---")
-    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 제한 기준 필터 [ON]\n- **탐색 대상: P, W, T 항로 [ON]**")
+    st.info("💡 **엔진 상태:**\n- 정밀 에어웨이 모델 [ON]\n- 외부 DB 연동 [ON]\n- P-Route 제한 기준 필터 [ON]\n- 탐색 대상: P, W, T 항로 [ON]\n- **입력 데이터 자동 저장 [ON]**")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -339,7 +339,6 @@ wp_df, aw_df, route_df, fix_df, city_pair_dict, sxx_dict = load_static_db()
 
 if wp_df is None or aw_df is None or route_df is None:
     st.error("🚨 필수 DB 파일이 누락되었습니다. (`Waypoint.xlsx`, `airway.xlsx`, `DB_ROUTE.xlsx`)")
-    st.info("💡 `CITY PAIR.xlsx` 및 `SXX.xlsx` 파일도 깃허브에 함께 올려주세요!")
     st.stop()
 else:
     if 'engine' not in st.session_state:
@@ -347,7 +346,6 @@ else:
             st.session_state.engine = DualCoreEngine(wp_df, aw_df, route_df, fix_df)
             st.session_state.engine.build_db()
 
-# UI 레이아웃 분리
 col_left, col_right = st.columns([1, 1.2], gap="large")
 
 with col_left:
@@ -358,16 +356,29 @@ with col_left:
 
 with col_right:
     st.subheader("🌪️ 2. 태풍 데이터 입력")
-    st.caption("표를 클릭하여 직접 수정/추가할 수 있습니다.")
-    default_typhoons = pd.DataFrame({
-        '태풍명': ['HINNAMNOR', '', ''],
-        '위도(Lat)': [25.5, None, None],
-        '경도(Lon)': [125.5, None, None],
-        '시작일시': [datetime.now().strftime("%Y-%m-%d %H:%M"), '', ''],
-        '종료일시': [(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M"), '', ''],
-        '반경(nm)': [300, None, None]
-    })
-    edited_typhoons = st.data_editor(default_typhoons, num_rows="dynamic", use_container_width=True, height=210)
+    st.caption("표를 클릭하여 여러 개의 태풍을 자유롭게 추가/수정하세요. (자동 저장됨)")
+    
+    # 🚨 [신규] Session State를 이용한 데이터 증발 방지
+    if 'typhoon_input_data' not in st.session_state:
+        st.session_state.typhoon_input_data = pd.DataFrame({
+            '태풍명': ['HINNAMNOR', '', ''],
+            '위도(Lat)': [25.5, None, None],
+            '경도(Lon)': [125.5, None, None],
+            '시작일시': [datetime.now().strftime("%Y-%m-%d %H:%M"), '', ''],
+            '종료일시': [(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M"), '', ''],
+            '반경(nm)': [300.0, None, None]
+        })
+
+    # 메모리(Session State)에 저장된 데이터를 불러와서 에디터에 표시
+    edited_typhoons = st.data_editor(
+        st.session_state.typhoon_input_data, 
+        num_rows="dynamic", 
+        use_container_width=True, 
+        height=210
+    )
+    
+    # 에디터에서 수정된 사항을 즉시 메모리에 덮어쓰기 (새로고침 되어도 날아가지 않음)
+    st.session_state.typhoon_input_data = edited_typhoons
 
 if f_skd:
     if 'analysis_done' not in st.session_state:
@@ -454,8 +465,8 @@ if f_skd:
                     for _, r in matched_routes.iterrows():
                         r_name = str(r.iloc[2]).strip().upper()
                         
-                        # 🚨 [신규 필터]: P, W, T 로 시작하는 항로만 분석 대상으로 수집
-                        if not (r_name.startswith('P') or r_name.startswith('W') or r_name.startswith('T')):
+                        # 🚨 [유지] P, W, T 항로만 분석 대상에 포함시키는 필터
+                        if not (r_name.startswith('P') or r_name.startswith('W') or r_name.startswith('T')): 
                             continue
                             
                         r_data = eng.get_route_data(r_name, str(r.iloc[4]), dep, arr)
@@ -511,7 +522,6 @@ if f_skd:
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
-                    # 제한 판별의 핵심: 제한된 항로 중에 'P' 항로가 있을 때만 경고 리스트에 담음
                     has_p_risk = False
                     if risk_routes:
                         has_p_risk = any(r_str.startswith('P') for r_str in risk_routes)
