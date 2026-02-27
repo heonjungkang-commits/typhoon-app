@@ -1,5 +1,5 @@
 # ==========================================
-# [Final v35.7] 태풍 분석 시스템 (Dual Core + P-Route 필터 + UI 보존)
+# [Final v36.2] 태풍 분석 시스템 (Web Input + 사내 포맷팅 + SXX 외부 연동)
 # ==========================================
 import streamlit as st
 import pandas as pd
@@ -22,7 +22,7 @@ with st.sidebar:
     USE_INTERPOLATION = st.checkbox("내삽(Interpolation) 사용", value=True)
     MAX_VALID_SEGMENT_NM = st.number_input("점프 방지 거리(nm)", value=600)
     st.markdown("---")
-    st.info("💡 **정밀 에어웨이 모델**, **P-Route 필터**, **GIS 지도 시각화**가 활성화되었습니다.")
+    st.info("💡 **정밀 에어웨이, P-Route 필터, 웹 태풍 입력, 외부 DB(CITY PAIR, SXX) 연동**이 활성화되었습니다.")
 
 # ---------------------------------------------------------
 # 1. 고정 데이터 & 유틸리티
@@ -39,25 +39,46 @@ def load_static_db():
         wp_raw = pd.read_excel("Waypoint.xlsx")
         aw_raw = pd.read_excel("airway.xlsx")
         rte_raw = pd.read_excel("DB_ROUTE.xlsx")
-        try:
-            fix_raw = pd.read_csv("FIX_result.csv")
-        except:
-            fix_raw = None
+        
+        try: city_pair_raw = pd.read_excel("CITY PAIR.xlsx")
+        except: city_pair_raw = None
+        
+        # 🚨 [신규] SXX.xlsx 외부 파일 로드
+        try: sxx_raw = pd.read_excel("SXX.xlsx")
+        except: sxx_raw = None
+        
+        try: fix_raw = pd.read_csv("FIX_result.csv")
+        except: fix_raw = None
         
         wp_df = wp_raw.dropna(subset=[wp_raw.columns[0]])
         aw_df = aw_raw.dropna(subset=[aw_raw.columns[0]])
         route_df = rte_raw.dropna(how='all')
         
-        return wp_df, aw_df, route_df, fix_raw
+        city_pair_dict = {}
+        if city_pair_raw is not None:
+            for _, r in city_pair_raw.iterrows():
+                try: city_pair_dict[str(r.iloc[0]).strip()] = str(r.iloc[1]).strip()
+                except: pass
+                
+        # SXX 딕셔너리 생성 (출발/도착 판별용)
+        sxx_dict = {'SO': {}, 'SI': {}}
+        if sxx_raw is not None:
+            for _, r in sxx_raw.iterrows():
+                try:
+                    code = str(r.iloc[0]).strip().upper()
+                    apt = str(r.iloc[1]).strip().upper()
+                    if code.startswith('SO'): sxx_dict['SO'][apt] = code
+                    elif code.startswith('SI'): sxx_dict['SI'][apt] = code
+                except: pass
+                
+        return wp_df, aw_df, route_df, fix_raw, city_pair_dict, sxx_dict
     except FileNotFoundError:
-        return None, None, None, None
+        return None, None, None, None, {}, {'SO': {}, 'SI': {}}
 
 def parse_wkt_point(wkt_str):
     try:
         match = re.match(r'POINT\s*\(\s*([-\d\.]+)\s+([-\d\.]+)\s*\)', str(wkt_str).upper())
-        if match:
-            lon, lat = float(match.group(1)), float(match.group(2))
-            return (lat, lon)
+        if match: return (float(match.group(2)), float(match.group(1)))
     except: pass
     return None
 
@@ -122,8 +143,20 @@ def get_airport_coords(code):
     if len(c)==3 and c in airports_iata: return (airports_iata[c]['lat'], airports_iata[c]['lon'])
     return None
 
+# 🚨 [변경됨] SXX DB 연동을 통한 동적 판별 함수
+def get_s_xx(dep, arr, sxx_dict):
+    d_iata = next((k for k in get_codes(dep) if len(k)==3), dep[:3])
+    a_iata = next((k for k in get_codes(arr) if len(k)==3), arr[:3])
+
+    # 도착지가 SO 리스트에 있으면 해당 코드 반환
+    if a_iata in sxx_dict['SO']: return sxx_dict['SO'][a_iata]
+    # 출발지가 SI 리스트에 있으면 해당 코드 반환
+    if d_iata in sxx_dict['SI']: return sxx_dict['SI'][d_iata]
+    
+    return ''
+
 # ---------------------------------------------------------
-# 2. 듀얼 코어 & 중국 FIR 판별 엔진
+# 2. 듀얼 코어 & 엔진
 # ---------------------------------------------------------
 class DualCoreEngine:
     def __init__(self, wp_df, aw_df, route_df, fix_df):
@@ -260,10 +293,8 @@ class DualCoreEngine:
                             if not is_valid_coord(curr): continue
                             jump_dist = fast_dist_nm(current_valid_pos, curr)
                             if jump_dist > MAX_VALID_SEGMENT_NM: continue 
-                            
                             for ip in interpolate_segment(current_valid_pos, curr, 50):
                                 coords_info.append({'coord': ip, 'name': None, 'is_china': False})
-                                
                             name = pt_data['name']
                             approx = (round(curr[0], 2), round(curr[1], 2))
                             is_cn = (name, approx) in self.china_nodes
@@ -297,23 +328,38 @@ class DualCoreEngine:
 # ---------------------------------------------------------
 st.title("🌪️ Typhoon Flight Analyzer")
 
-wp_df, aw_df, route_df, fix_df = load_static_db()
+# 🚨 SXX DB 딕셔너리 함께 수신
+wp_df, aw_df, route_df, fix_df, city_pair_dict, sxx_dict = load_static_db()
+
 if wp_df is None or aw_df is None or route_df is None:
     st.error("🚨 필수 DB 파일이 누락되었습니다. (`Waypoint.xlsx`, `airway.xlsx`, `DB_ROUTE.xlsx`)")
+    st.info("💡 `CITY PAIR.xlsx` 및 `SXX.xlsx` 파일도 깃허브에 함께 올려주세요!")
     st.stop()
 else:
     if 'engine' not in st.session_state:
-        with st.spinner("📦 듀얼 코어 및 정밀 라우팅 모델 초기화 중..."):
+        with st.spinner("📦 듀얼 코어 엔진 초기화 중..."):
             st.session_state.engine = DualCoreEngine(wp_df, aw_df, route_df, fix_df)
             st.session_state.engine.build_db()
         st.success(f"✅ 엔진 로드 완료 (총 {len(st.session_state.engine.global_db):,}개의 웨이포인트 장착!)")
 
-col1, col2 = st.columns(2)
-with col1: f_skd = st.file_uploader("✈️ SKD_BASE 업로드", type=['xlsx'])
-with col2: f_rest = st.file_uploader("🌪️ Restrictions 업로드", type=['xlsx'])
+st.markdown("### 🛫 1. 오늘의 스케줄 업로드")
+f_skd = st.file_uploader("SKD_BASE CSV 파일을 업로드해주세요", type=['csv'])
 
-if f_skd and f_rest:
-    # 🚨 Session State 변수 초기화
+st.markdown("### 🌪️ 2. 태풍 정보 직접 입력")
+st.info("표를 클릭하여 태풍 정보를 직접 기입할 수 있습니다. (행 추가/삭제 가능)")
+
+default_typhoons = pd.DataFrame({
+    '태풍명': ['HINNAMNOR', '', ''],
+    '위도(Lat)': [25.5, None, None],
+    '경도(Lon)': [125.5, None, None],
+    '시작일시': [datetime.now().strftime("%Y-%m-%d %H:%M"), '', ''],
+    '종료일시': [(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d %H:%M"), '', ''],
+    '반경(nm)': [300, None, None]
+})
+
+edited_typhoons = st.data_editor(default_typhoons, num_rows="dynamic", use_container_width=True)
+
+if f_skd:
     if 'analysis_done' not in st.session_state:
         st.session_state.analysis_done = False
         st.session_state.df_res = None
@@ -322,20 +368,30 @@ if f_skd and f_rest:
         st.session_state.typhoons = []
 
     if st.button("🚀 정밀 비행편 분석 시작", type="primary", use_container_width=True):
-        st.session_state.analysis_done = False # 새로운 분석 시작 시 초기화
+        st.session_state.analysis_done = False 
         
         with st.spinner("태풍 회피 및 영공 통과 시간을 정밀 분석 중입니다..."):
             eng = st.session_state.engine
-            skd_df = pd.read_excel(f_skd)
-            rest_df = pd.read_excel(f_rest)
+            
+            try:
+                skd_df = pd.read_csv(f_skd, encoding='utf-8-sig')
+            except UnicodeDecodeError:
+                f_skd.seek(0)
+                skd_df = pd.read_csv(f_skd, encoding='cp949') 
+            except Exception as e:
+                st.error("CSV 파일을 읽는 중 오류가 발생했습니다. 파일 형식을 확인해주세요.")
+                st.stop()
             
             typhoons = []
-            for _, r in rest_df.iterrows():
+            for _, r in edited_typhoons.iterrows():
                 try:
-                    parts = re.split(r'[,\s]+', str(r.iloc[1]).strip())
+                    if pd.isna(r['위도(Lat)']) or pd.isna(r['경도(Lon)']) or not str(r['태풍명']).strip(): continue
                     typhoons.append({
-                        'n': r.iloc[0], 'c': (float(parts[0]), float(parts[1])),
-                        's': pd.to_datetime(r.iloc[2]), 'e': pd.to_datetime(r.iloc[3]), 'r': float(r.iloc[4])
+                        'n': str(r['태풍명']).strip(),
+                        'c': (float(r['위도(Lat)']), float(r['경도(Lon)'])),
+                        's': pd.to_datetime(r['시작일시']),
+                        'e': pd.to_datetime(r['종료일시']),
+                        'r': float(r['반경(nm)'])
                     })
                 except: continue
             
@@ -393,6 +449,8 @@ if f_skd and f_rest:
                     avg_speed = ref_route['data']['total_dist'] / fly_hours
                     if avg_speed < 100: avg_speed = 450.0 
                     
+                    p01_fly_mins = (ref_route['data']['total_dist'] / avg_speed) * 60
+                    
                     risk_routes = []
                     safe_list = []
                     china_transit_list = []
@@ -401,6 +459,10 @@ if f_skd and f_rest:
                         r_name = r['name']; r_data = r['data']
                         est_hours = r_data['total_dist'] / avg_speed
                         est_fly_time = timedelta(hours=est_hours)
+                        est_mins = est_hours * 60
+                        
+                        ft_increase = round(est_mins - p01_fly_mins) if r_name != ref_route['name'] else 0
+                        if ft_increase < 0: ft_increase = 0 
                         
                         hit = False; hit_msg = ""
                         china_pts = [] 
@@ -420,7 +482,7 @@ if f_skd and f_rest:
                                             break
                         
                         if hit: risk_routes.append(hit_msg)
-                        else: safe_list.append({'name': r_name, 'dist': r_data['total_dist']})
+                        else: safe_list.append({'name': r_name, 'ft_inc': ft_increase})
                         
                         if china_pts:
                             entry = china_pts[0]
@@ -430,26 +492,47 @@ if f_skd and f_rest:
                             else:
                                 china_transit_list.append(f"{r_name} ({entry[0]} {entry[1].strftime('%H:%M')} ~ {exit_[1].strftime('%H:%M')} {exit_[0]})")
                     
-                    # 🚨 [신규 필터] P로 시작하는 항로가 제한받았을 때만 리스트에 추가
                     has_p_risk = False
                     if risk_routes:
                         has_p_risk = any(r_str.startswith('P') for r_str in risk_routes)
                     
                     if has_p_risk:
-                        safe_list.sort(key=lambda x: x['dist'])
+                        safe_list.sort(key=lambda x: x['ft_inc']) 
+                        
+                        pair_key_1 = f"{dep[:3]}/{arr[:3]}"
+                        pair_key_2 = f"{dep}/{arr}"
+                        bound_val = city_pair_dict.get(pair_key_1, city_pair_dict.get(pair_key_2, ""))
+                        
+                        # 🚨 [신규] 외부 SXX 딕셔너리를 활용하여 분류
+                        s_xx_val = get_s_xx(dep, arr, sxx_dict)
+                        
                         res_list.append({
-                            'FLT': f_no, 'DATE': str(d_raw.date()), 'DEP': dep, 'ARR': arr,
-                            'STD': t_std.strftime("%H:%M"), 'STA': t_sta.strftime("%H:%M"),
-                            'RESTRICTED_ROUTES': ", ".join(risk_routes),
-                            'CHINA_TRANSIT': ", ".join(china_transit_list) if china_transit_list else "N/A",
-                            'REC_ROUTE_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
-                            'DIST_1': f"{safe_list[0]['dist']:.0f}" if len(safe_list)>0 else "",
-                            'REC_ROUTE_2': safe_list[1]['name'] if len(safe_list)>1 else "",
-                            'DIST_2': f"{safe_list[1]['dist']:.0f}" if len(safe_list)>1 else "",
-                            'REC_ROUTE_3': safe_list[2]['name'] if len(safe_list)>2 else "",
-                            'DIST_3': f"{safe_list[2]['dist']:.0f}" if len(safe_list)>2 else "",
-                            'REC_ROUTE_4': safe_list[3]['name'] if len(safe_list)>3 else "",
-                            'DIST_4': f"{safe_list[3]['dist']:.0f}" if len(safe_list)>3 else ""
+                            'BND': bound_val,
+                            'DATE': str(d_raw.date()),
+                            'FLT': f_no,
+                            'FR': dep,
+                            'TO': arr,
+                            'STD': t_std.strftime("%H:%M"),
+                            'STA': t_sta.strftime("%H:%M"),
+                            'AC': "", 
+                            'C_RTE': s_xx_val,
+                            '예보시간': "", 
+                            '항로목록': ", ".join(risk_routes),
+                            '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "N/A",
+                            'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
+                            '항로명_2': safe_list[1]['name'] if len(safe_list)>1 else "",
+                            'F/T 증가_2': safe_list[1]['ft_inc'] if len(safe_list)>1 else "",
+                            '항로명_3': safe_list[2]['name'] if len(safe_list)>2 else "",
+                            'F/T 증가_3': safe_list[2]['ft_inc'] if len(safe_list)>2 else "",
+                            '항로명_4': safe_list[3]['name'] if len(safe_list)>3 else "",
+                            'F/T 증가_4': safe_list[3]['ft_inc'] if len(safe_list)>3 else "",
+                            '최종 사용항로': "",
+                            '승무 구성': "",
+                            '허가신청자': "",
+                            '허가 필요 국가': "",
+                            'CHN Route Code': ", ".join(china_transit_list) if china_transit_list else "",
+                            '허가 신청': "",
+                            '허가 취득': ""
                         })
                         
                         dep_c = get_airport_coords(dep_keys[0]) if dep_keys else None
@@ -464,12 +547,18 @@ if f_skd and f_rest:
 
             status_text.empty()
             
-            # 분석 결과 Session State에 저장 (지도 조작 시 날아가지 않도록)
             st.session_state.map_store = map_store
             st.session_state.typhoons = typhoons
             
             if res_list:
                 df_res = pd.DataFrame(res_list)
+                
+                df_res.columns = [
+                    'BND', 'DATE', 'FLT', 'FR', 'TO', 'STD', 'STA', 'AC', 'C_RTE', '예보시간', 
+                    '항로목록', '항로명', 'F/T 증가', '항로명 ', 'F/T 증가 ', '항로명  ', 'F/T 증가  ', '항로명   ', 'F/T 증가   ', 
+                    '최종 사용항로', '승무 구성', '허가신청자', '허가 필요 국가', 'CHN Route Code', '허가 신청', '허가 취득'
+                ]
+                
                 st.session_state.df_res = df_res
                 
                 output = io.BytesIO()
@@ -486,7 +575,7 @@ if f_skd and f_rest:
             st.session_state.analysis_done = True
 
     # ---------------------------------------------------------
-    # 3. 결과 표출 및 지도 시각화 (Session State 기반)
+    # 3. 결과 표출 및 지도 시각화
     # ---------------------------------------------------------
     if st.session_state.get('analysis_done'):
         if st.session_state.df_res is not None:
@@ -494,9 +583,9 @@ if f_skd and f_rest:
             st.dataframe(st.session_state.df_res)
             
             st.download_button(
-                label="💾 최종 분석 결과 엑셀 다운로드", 
+                label="💾 최종 분석 결과 엑셀 다운로드 (사내 포맷 적용)", 
                 data=st.session_state.excel_data, 
-                file_name="Typhoon_Analysis_Result.xlsx", 
+                file_name="Typhoon_Analysis_Result_Formatted.xlsx", 
                 mime="application/vnd.ms-excel"
             )
             
