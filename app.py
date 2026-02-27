@@ -549,7 +549,7 @@ if f_skd:
                             'STA': t_sta.strftime("%H:%M"),
                             'AC': ac_type, 
                             'C_RTE': s_xx_val,
-                            '항로목록': risk_routes_str, 
+                            '제한목록': risk_routes_str, 
                             '항로명_1': safe_list[0]['name'] if len(safe_list)>0 else "",
                             'F/T 증가_1': safe_list[0]['ft_inc'] if len(safe_list)>0 else "",
                             '항로명_2': safe_list[1]['name'] if len(safe_list)>1 else "",
@@ -743,4 +743,5 @@ if f_skd:
             col_m2.metric("리포트 표출 운항편", "0편", delta="ALL CLEAR", delta_color="normal")
             col_m3.metric("안전성 상태", "정상 운항 🟢")
             st.success("✅ 조건에 해당하는 표출 운항편이 없습니다.")
+
 
